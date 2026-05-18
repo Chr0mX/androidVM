@@ -655,8 +655,8 @@ jobs:
   # without requiring a live VM boot.
   validate-artifact:
     name: Validate artifact (static)
-    needs: [preflight, build]
-    if: needs.build.result == 'success'
+    needs: [preflight, build, restore-from-cache]
+    if: needs.build.result == 'success' || needs.restore-from-cache.result == 'success'
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
