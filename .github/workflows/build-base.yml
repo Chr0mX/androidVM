@@ -178,7 +178,7 @@ jobs:
             grub-efi-amd64-bin parted
           pip3 install jsonschema --quiet
 
-      # ── Download & verify Android x86_64 source image ──────────────────
+      # ── Download & verify Bliss OS source ISO ─────────────────────────
       - name: Cache source image download
         uses: actions/cache@v4
         id: source-cache
@@ -190,19 +190,38 @@ jobs:
         if: steps.source-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p source-image
-          echo "Downloading: ${{ needs.preflight.outputs.source_img_filename }}"
+
+          if [ -n "${{ inputs.source_img_url }}" ]; then
+            ISO_URL="${{ inputs.source_img_url }}"
+            ISO_NAME=$(basename "$(dirname "$ISO_URL")")
+            echo "Using manually provided URL: ${ISO_URL}"
+          else
+            # Resolve the latest Bliss OS 14 FOSS ISO from SourceForge
+            resolver_out=$(python3 scripts/lib/resolve-blissos-url.py \
+              --path "${{ env.BLISSOS_SF_PATH }}" \
+              --filter ".iso")
+            ISO_URL=$(echo "$resolver_out" | grep '^url='      | cut -d= -f2-)
+            ISO_NAME=$(echo "$resolver_out" | grep '^filename=' | cut -d= -f2-)
+            [ -n "$ISO_URL" ] \
+              || { echo "::error::resolve-blissos-url.py returned no URL"; exit 1; }
+            echo "Resolved latest Bliss OS ISO: ${ISO_NAME}"
+            echo "Download URL: ${ISO_URL}"
+          fi
+
           curl -L --retry 5 --retry-delay 10 \
-            "${{ needs.preflight.outputs.source_img_url }}" \
+            "${ISO_URL}" \
             -o source-image/source.img
+
           if [ -n "${{ env.SOURCE_IMG_SHA256 }}" ]; then
             echo "${{ env.SOURCE_IMG_SHA256 }}  source-image/source.img" | sha256sum -c
           else
             echo "::warning::No SHA256 pinned for source image — skipping checksum"
           fi
+
           # Verify the download is actually an ISO, not an HTML redirect page
           file source-image/source.img
           file source-image/source.img | grep -qi "ISO 9660\|CD-ROM" \
-            || { echo "::error::Downloaded file is not an ISO — SourceForge may have served an HTML page. Check the resolved URL."; exit 1; }
+            || { echo "::error::Downloaded file is not an ISO — SourceForge may have served an HTML page. URL: ${ISO_URL}"; exit 1; }
 
       # ── Download & verify GApps ─────────────────────────────────────────
       - name: Cache GApps download
