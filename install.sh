@@ -35,13 +35,53 @@ ok()   { printf "${GRN}[  ok  ]${NC} %s\n" "$*"; }
 warn() { printf "${YEL}[ warn ]${NC} %s\n" "$*"; }
 die()  { printf "${RED}[ FAIL ]${NC} %s\n" "$*"; exit 1; }
 
-# ── Defaults ──────────────────────────────────────────────────────────────
-REPO_URL="https://github.com/Chr0mX/androidVM.git"
-WORKSPACE_DIR="${HOME}/android11-vm"
-STARTER_PROFILE="pixel6a-bp1a"
-DO_BOOT=false
-SKIP_VERIFY=false
-NO_DOWNLOAD=false
+usage() {
+  cat <<'HELP'
+Android 11 VM — install.sh
+
+SYNOPSIS
+  # Minimal one-liner (curl pipe):
+  curl -fsSL https://raw.githubusercontent.com/Chr0mX/androidVM/main/install.sh | bash
+
+  # With options via env vars (required when piping through curl):
+  curl -fsSL .../install.sh | ANDROID_VM_PROFILE=pixel7-ap1a ANDROID_VM_BOOT=1 bash
+
+  # Cloned locally:
+  bash install.sh [OPTIONS]
+
+OPTIONS
+  --profile <name>    Device profile to apply   (default: pixel6a-bp1a)
+  --dir <path>        Workspace directory        (default: ~/android11-vm)
+  --repo <url>        Git repo to clone          (default: Chr0mX/androidVM)
+  --boot              Launch VM after building
+  --skip-verify       Skip ADB verification after boot
+  --no-download       Build intermediate image locally instead of fetching release
+
+ENV VAR OVERRIDES (use these when piping via curl)
+  ANDROID_VM_PROFILE    same as --profile
+  ANDROID_VM_DIR        same as --dir
+  ANDROID_VM_REPO       same as --repo
+  ANDROID_VM_BOOT       same as --boot       (set to any non-empty value)
+  ANDROID_VM_NO_DL      same as --no-download (set to any non-empty value)
+  ANDROID_VM_SKIP_VFY   same as --skip-verify (set to any non-empty value)
+
+EXAMPLES
+  # Pipe install, boot with Pixel 7 profile
+  curl -fsSL https://raw.githubusercontent.com/Chr0mX/androidVM/main/install.sh \
+    | ANDROID_VM_PROFILE=pixel7-ap1a ANDROID_VM_BOOT=1 bash
+
+  # Local install, build intermediate locally, boot and verify
+  bash install.sh --profile samsung-s23-eu --no-download --boot
+HELP
+}
+
+# ── Defaults (env vars take lowest precedence, flags override them) ────────
+REPO_URL="${ANDROID_VM_REPO:-https://github.com/Chr0mX/androidVM.git}"
+WORKSPACE_DIR="${ANDROID_VM_DIR:-${HOME}/android11-vm}"
+STARTER_PROFILE="${ANDROID_VM_PROFILE:-pixel6a-bp1a}"
+DO_BOOT="${ANDROID_VM_BOOT:+true}"; DO_BOOT="${DO_BOOT:-false}"
+SKIP_VERIFY="${ANDROID_VM_SKIP_VFY:+true}"; SKIP_VERIFY="${SKIP_VERIFY:-false}"
+NO_DOWNLOAD="${ANDROID_VM_NO_DL:+true}"; NO_DOWNLOAD="${NO_DOWNLOAD:-false}"
 BASE_IMAGE_RELEASE="https://github.com/Chr0mX/androidVM/releases/latest/download"
 MIN_DISK_GB=25
 MIN_RAM_GB=6
@@ -55,9 +95,7 @@ while [[ $# -gt 0 ]]; do
     --boot)         DO_BOOT=true;         shift   ;;
     --skip-verify)  SKIP_VERIFY=true;     shift   ;;
     --no-download)  NO_DOWNLOAD=true;     shift   ;;
-    -h|--help)
-      grep '^#  ' "$0" | sed 's/^#  //'
-      exit 0 ;;
+    -h|--help)      usage; exit 0         ;;
     *) die "Unknown argument: $1" ;;
   esac
 done

@@ -7,12 +7,30 @@ Bootable Android 11 x86_64 QEMU/KVM image with pre-integrated GApps, ARM transla
 ## Quick Start
 
 ```bash
-# One-command install (Ubuntu/Debian/Fedora)
-bash install.sh --profile pixel6a-bp1a --boot
+# One-liner from anywhere — installs deps, downloads base image, applies default profile
+curl -fsSL https://raw.githubusercontent.com/Chr0mX/androidVM/main/install.sh | bash
 
-# Or step by step:
+# With options via env vars (required when piping through curl):
+curl -fsSL https://raw.githubusercontent.com/Chr0mX/androidVM/main/install.sh \
+  | ANDROID_VM_PROFILE=pixel7-ap1a ANDROID_VM_BOOT=1 bash
+
+# Cloned locally with flags:
+bash install.sh --profile samsung-s23-eu --boot
+
+# Step by step after install:
 bash scripts/set-profile.sh pixel6a-bp1a --rebuild --boot --check
 ```
+
+### Env var overrides (for the curl pipe case)
+
+| Env var | Flag equivalent | Description |
+|---|---|---|
+| `ANDROID_VM_PROFILE` | `--profile` | Profile name to apply |
+| `ANDROID_VM_DIR` | `--dir` | Workspace directory |
+| `ANDROID_VM_REPO` | `--repo` | Git repo URL to clone |
+| `ANDROID_VM_BOOT` | `--boot` | Set to any value to launch VM after build |
+| `ANDROID_VM_NO_DL` | `--no-download` | Build intermediate locally |
+| `ANDROID_VM_SKIP_VFY` | `--skip-verify` | Skip ADB verification |
 
 ## Prerequisites
 
