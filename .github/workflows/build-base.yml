@@ -23,6 +23,10 @@ on:
         description: 'Override GApps download URL (leave blank for default)'
         type: string
         default: ''
+      run_smoke_test:
+        description: 'Run full VM boot smoke test (requires self-hosted KVM runner)'
+        type: boolean
+        default: false
 
 # Only one build runs at a time — later runs cancel earlier queued ones
 concurrency:
@@ -98,39 +102,47 @@ jobs:
           key: ${{ needs.preflight.outputs.cache_key }}
           lookup-only: true
 
-  # ─── Job 3: build the intermediate image (runs on self-hosted for KVM) ───
+  # ─── Job 3: build the intermediate image ─────────────────────────────────
+  #
+  # Runs on standard GitHub-hosted ubuntu-22.04 runners. KVM is NOT required
+  # here — the image is built via offline NBD mount + file injection, which is
+  # pure userspace. If /dev/kvm happens to be present the step logs it, but
+  # the build never tries to boot the VM.
+  #
+  # Note on performance: without KVM, QEMU TCG would be slow — but this job
+  # never boots QEMU. qemu-nbd and qemu-img are host tools only. Runtime is
+  # dominated by download speeds and rsync, not emulation.
   build:
     name: Build intermediate image
     needs: [preflight, check-cache]
-    # Skip if cache is valid and not forcing a rebuild
     if: needs.check-cache.outputs.cache_hit != 'true' || inputs.force_rebuild == true
-    # GitHub-hosted ubuntu-22.04 runners do NOT have /dev/kvm.
-    # Register a self-hosted runner tagged 'kvm' for real builds.
-    # To register: Settings → Actions → Runners → New self-hosted runner
-    #              Label it: self-hosted, linux, kvm
-    runs-on: [self-hosted, linux, kvm]
-    timeout-minutes: 120
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Detect execution environment
+        id: env_detect
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo "kvm=true" >> $GITHUB_OUTPUT
+            echo "KVM available — hardware acceleration present"
+          else
+            echo "kvm=false" >> $GITHUB_OUTPUT
+            echo "::notice::KVM not available on this runner. Build uses offline NBD" \
+                 "mount only and does not boot the VM, so this is fine."
+          fi
 
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            qemu-system-x86 qemu-utils qemu-kvm \
+            qemu-system-x86 qemu-utils \
             android-tools-adb simg2img img2simg \
             e2fsck python3 python3-pip jq curl rsync \
             ovmf p7zip-full
           pip3 install jsonschema --quiet
-
-      - name: Verify KVM is accessible
-        run: |
-          if [ ! -e /dev/kvm ]; then
-            echo "::warning::/dev/kvm not available — build will use TCG (slow)"
-          else
-            echo "KVM available: $(ls -la /dev/kvm)"
-          fi
 
       # ── Download & verify Android x86_64 source image ──────────────────
       - name: Cache source image download
@@ -201,7 +213,8 @@ jobs:
             -F qcow2 \
             work/${{ env.OUTPUT_IMAGE }}
 
-      # ── Mount and patch ─────────────────────────────────────────────────
+      # ── Mount via NBD and inject ────────────────────────────────────────
+      # NBD mount is pure userspace — does not require KVM or hardware virt.
       - name: Load nbd module
         run: |
           sudo modprobe nbd max_part=8
@@ -318,15 +331,113 @@ jobs:
           echo "Cache hit — skipping build"
           ls -lh image-cache/
 
-  # ─── Job 5: smoke test — boot the image headlessly and check ADB ──────
-  smoke-test:
-    name: Smoke test
+  # ─── Job 5: static artifact validation (no KVM needed) ───────────────
+  #
+  # Runs on GitHub-hosted runners. Mounts the built image via NBD and spot-
+  # checks that key files were injected correctly. Catches injection failures
+  # without requiring a live VM boot.
+  validate-artifact:
+    name: Validate artifact (static)
     needs: [build]
     if: needs.build.result == 'success'
-    runs-on: [self-hosted, linux, kvm]
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-utils python3 jq
+          pip3 install jsonschema --quiet
+
+      - name: Restore built image from cache
+        uses: actions/cache/restore@v4
+        with:
+          path: image-cache/
+          key: ${{ needs.build.outputs.cache_key || needs.preflight.outputs.cache_key }}
+
+      - name: Verify image integrity
+        run: |
+          echo "=== qemu-img check ==="
+          qemu-img check image-cache/${{ env.OUTPUT_IMAGE }}
+          echo "=== Image info ==="
+          qemu-img info image-cache/${{ env.OUTPUT_IMAGE }}
+          echo "=== Checksum ==="
+          cd image-cache && sha256sum -c ${{ env.OUTPUT_IMAGE }}.sha256
+
+      - name: Mount and spot-check injected files
+        run: |
+          sudo modprobe nbd max_part=8
+          sleep 1
+          sudo qemu-nbd --connect=/dev/nbd0 image-cache/${{ env.OUTPUT_IMAGE }}
+          sleep 2
+          sudo mkdir -p mnt/{system,vendor}
+          sudo mount /dev/nbd0p2 mnt/system || true
+          sudo mount /dev/nbd0p5 mnt/vendor || true
+
+          echo "=== GApps presence ==="
+          FAIL=0
+          check_file() {
+            if [ -e "$1" ]; then
+              echo "  ✓ $1"
+            else
+              echo "  ✗ MISSING: $1"
+              FAIL=$((FAIL+1))
+            fi
+          }
+          check_file mnt/system/priv-app/GmsCore
+          check_file mnt/system/etc/permissions/privapp-permissions-google.xml
+
+          echo "=== ARM translation presence ==="
+          check_file mnt/vendor/lib64/ndk_translation/libndk_translation.so
+          check_file mnt/vendor/etc/binfmt_misc
+
+          echo "=== ARM bridge props ==="
+          if sudo grep -q "ro.dalvik.vm.native.bridge=libndk_translation.so" \
+               mnt/vendor/build.prop 2>/dev/null; then
+            echo "  ✓ ro.dalvik.vm.native.bridge present"
+          else
+            echo "  ✗ ro.dalvik.vm.native.bridge missing from vendor/build.prop"
+            FAIL=$((FAIL+1))
+          fi
+
+          sudo umount mnt/system mnt/vendor 2>/dev/null || true
+          sudo qemu-nbd --disconnect /dev/nbd0 2>/dev/null || true
+          sudo rmdir mnt/system mnt/vendor 2>/dev/null || true
+
+          if [ "$FAIL" -gt 0 ]; then
+            echo "::error::$FAIL static check(s) failed"
+            exit 1
+          fi
+          echo "All static checks passed"
+
+  # ─── Job 6: full VM boot smoke test (optional, KVM only) ─────────────
+  #
+  # Only runs when explicitly requested via workflow_dispatch with
+  # run_smoke_test=true AND a self-hosted KVM runner is available.
+  # Never runs on push/schedule — it is not part of the default CI path.
+  #
+  # Software emulation (TCG) would take hours to boot Android and is not
+  # a viable fallback here. If no KVM runner is available, skip this job.
+  smoke-test:
+    name: Smoke test (KVM boot)
+    needs: [build]
+    if: inputs.run_smoke_test == true && needs.build.result == 'success'
+    runs-on: [self-hosted, linux, kvm]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm KVM is available
+        run: |
+          [ -e /dev/kvm ] || { echo "::error::/dev/kvm not found on this runner"; exit 1; }
+          echo "KVM confirmed: $(ls -la /dev/kvm)"
+
+      - name: Install ADB
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends android-tools-adb qemu-utils
 
       - name: Download built image from release
         run: |
@@ -338,7 +449,7 @@ jobs:
       - name: Create throw-away userdata volume
         run: qemu-img create -f qcow2 userdata-test.qcow2 4G
 
-      - name: Boot VM headlessly (30s timeout for ADB)
+      - name: Boot VM headlessly
         run: |
           qemu-system-x86_64 \
             -enable-kvm \
@@ -352,7 +463,7 @@ jobs:
             -display none \
             -daemonize \
             -pidfile /tmp/qemu.pid
-          echo "VM started, waiting for ADB..."
+          echo "VM started, waiting 30s for ADB..."
           sleep 30
 
       - name: ADB smoke checks
