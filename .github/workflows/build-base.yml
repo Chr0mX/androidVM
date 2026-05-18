@@ -143,7 +143,8 @@ jobs:
             qemu-system-x86 qemu-utils \
             android-tools-adb simg2img \
             e2fsprogs python3 python3-pip jq curl rsync \
-            ovmf p7zip-full lzip unzip
+            ovmf p7zip-full lzip unzip \
+            grub-efi-amd64-bin parted
           pip3 install jsonschema --quiet
 
       # ── Download & verify Android x86_64 source image ──────────────────
@@ -200,48 +201,73 @@ jobs:
         run: |
           bash scripts/lib/fetch-arm-trans.sh arm-trans/
 
-      # ── Prepare working image ───────────────────────────────────────────
-      - name: Convert source to qcow2
+      # ── Extract partition images from ISO ──────────────────────────────────
+      # The source is an ISO9660 image, not a partitioned disk. It contains
+      # system.img (and optionally vendor.img/product.img) as plain files inside
+      # the ISO filesystem. We extract and loop-mount them directly.
+      - name: Extract partition images from ISO
         run: |
-          mkdir -p work
-          qemu-img convert -f raw -O qcow2 \
-            source-image/android11.img work/android11-base.qcow2
-          qemu-img info work/android11-base.qcow2
+          mkdir -p iso-mount work
+          sudo mount -o loop,ro source-image/android11.img iso-mount
 
-      - name: Create intermediate layer
-        run: |
-          qemu-img create -f qcow2 \
-            -b "$(pwd)/work/android11-base.qcow2" \
-            -F qcow2 \
-            work/${{ env.OUTPUT_IMAGE }}
+          echo "=== ISO root contents ==="
+          ls -la iso-mount/
 
-      # ── Mount via NBD and inject ────────────────────────────────────────
-      # NBD mount is pure userspace — does not require KVM or hardware virt.
-      - name: Load nbd module
-        run: |
-          sudo modprobe nbd max_part=8
-          sleep 1
+          FOUND=0
+          for name in system vendor product; do
+            for candidate in "${name}.img" "${name}/${name}.img"; do
+              if [ -f "iso-mount/${candidate}" ]; then
+                size=$(du -sh "iso-mount/${candidate}" | cut -f1)
+                echo "Extracting ${candidate} (${size}) ..."
+                cp "iso-mount/${candidate}" "work/${name}.img"
+                FOUND=$((FOUND+1))
+                break
+              fi
+            done
+          done
 
-      - name: Mount intermediate image via NBD
+          # Save boot files needed for final disk assembly
+          for item in kernel initrd.img ramdisk.img isolinux grub efi; do
+            [ -e "iso-mount/${item}" ] && cp -r "iso-mount/${item}" "work/boot-${item}" || true
+          done
+
+          sudo umount iso-mount
+          rmdir iso-mount
+
+          [ "$FOUND" -gt 0 ] || { echo "::error::No partition images found in ISO root"; exit 1; }
+          echo "Extracted ${FOUND} partition image(s)"
+          ls -lh work/
+
+      - name: Convert Android sparse images to raw ext4
         run: |
-          sudo qemu-nbd --connect=/dev/nbd0 work/${{ env.OUTPUT_IMAGE }}
-          sleep 2
-          lsblk /dev/nbd0
+          for name in system vendor product; do
+            src="work/${name}.img"
+            [ -f "$src" ] || continue
+            dst="work/${name}.raw"
+            echo "Converting ${name}.img ..."
+            simg2img "$src" "$dst" 2>/dev/null \
+              && echo "  sparse → raw" \
+              || { cp "$src" "$dst"; echo "  as-is (not sparse)"; }
+            rm -f "$src"
+            file "$dst"
+          done
+
+      - name: Resize system image to accommodate GApps
+        run: |
+          # GApps adds ~400-500 MB; add 600 MB headroom before injection
+          e2fsck -yf work/system.raw || true
+          resize2fs work/system.raw +600M
+          e2fsck -yf work/system.raw || true
+
+      # ── Loop-mount raw images and inject ───────────────────────────────────
+      - name: Mount partition images
+        run: |
           sudo mkdir -p mnt/{system,vendor,product}
-
-      - name: Detect and mount partitions
-        run: |
-          PARTS=$(lsblk -o NAME,FSTYPE /dev/nbd0 --json | python3 -c "
-          import json,sys
-          data=json.load(sys.stdin)
-          for child in data['blockdevices'][0].get('children',[]):
-              print(child['name'], child.get('fstype',''))
-          ")
-          echo "Partition map:"
-          echo "$PARTS"
-          sudo mount /dev/nbd0p2 mnt/system
-          sudo mount /dev/nbd0p5 mnt/vendor
-          sudo mount /dev/nbd0p6 mnt/product || echo "No product partition — skipping"
+          sudo mount -o loop,rw work/system.raw mnt/system
+          [ -f work/vendor.raw ]  && sudo mount -o loop,rw work/vendor.raw  mnt/vendor  \
+            || echo "No vendor partition — vendor injection skipped"
+          [ -f work/product.raw ] && sudo mount -o loop,rw work/product.raw mnt/product \
+            || echo "No product partition — product injection skipped"
 
       - name: Inject GApps
         run: |
@@ -262,23 +288,92 @@ jobs:
             sudo restorecon -R -F mnt/system/priv-app/ 2>/dev/null || true
             sudo restorecon -R -F mnt/vendor/lib/ndk_translation/ 2>/dev/null || true
           else
-            echo "::notice::restorecon not available on host — Android init will" \
-                 "handle context labelling on first boot"
+            echo "::notice::restorecon not available — Android init handles context labelling on first boot"
           fi
 
-      - name: Unmount and disconnect
+      - name: Unmount partition images
         if: always()
         run: |
           sudo umount mnt/system mnt/vendor mnt/product 2>/dev/null || true
-          sudo qemu-nbd --disconnect /dev/nbd0 2>/dev/null || true
           sudo rmdir mnt/system mnt/vendor mnt/product 2>/dev/null || true
 
-      # ── Flatten and checksum ────────────────────────────────────────────
-      - name: Flatten backing chain into portable single image
+      # ── Assemble bootable disk image ────────────────────────────────────────
+      # Creates a GPT disk with an EFI partition (GRUB) and an ext4 Android data
+      # partition containing the modified system.img, kernel, and ramdisk.
+      # Android x86 boots by having GRUB loop-mount system.img from the data partition.
+      - name: Assemble bootable disk image
+        run: |
+          SYSTEM_SZ=$(stat -c%s work/system.raw)
+          VENDOR_SZ=$([ -f work/vendor.raw  ] && stat -c%s work/vendor.raw  || echo 0)
+          PRODUCT_SZ=$([ -f work/product.raw ] && stat -c%s work/product.raw || echo 0)
+          BOOT_SZ=$(find work/ -maxdepth 1 -name 'boot-*' -exec du -sb {} + 2>/dev/null \
+                    | awk '{s+=$1}END{print s+0}')
+
+          # EFI partition: 256 MB; data partition: content + 20% + 256 MB buffer
+          DATA_CONTENT=$(( SYSTEM_SZ + VENDOR_SZ + PRODUCT_SZ + BOOT_SZ ))
+          DATA_SZ=$(( DATA_CONTENT * 12 / 10 + 256 * 1024 * 1024 ))
+          DISK_SZ=$(( DATA_SZ + 256 * 1024 * 1024 + 4 * 1024 * 1024 ))
+          echo "Disk size: $(( DISK_SZ / 1024 / 1024 )) MB  (data $(( DATA_SZ / 1024 / 1024 )) MB)"
+
+          truncate -s $DISK_SZ work/android11-disk.raw
+
+          sudo parted -s work/android11-disk.raw \
+            mklabel gpt \
+            mkpart EFI  fat32 1MiB   257MiB \
+            set 1 esp on \
+            mkpart Data ext4  257MiB 100%
+
+          LOOP=$(sudo losetup --find --show --partscan work/android11-disk.raw)
+          echo "Loop device: $LOOP"
+          sleep 1
+
+          sudo mkfs.fat -F32 -n EFI    "${LOOP}p1"
+          sudo mkfs.ext4 -L Android    "${LOOP}p2"
+
+          sudo mkdir -p mnt/efi mnt/android
+          sudo mount "${LOOP}p1" mnt/efi
+          sudo mount "${LOOP}p2" mnt/android
+
+          # Copy Android system files to data partition
+          sudo cp work/system.raw  mnt/android/system.img
+          [ -f work/vendor.raw  ] && sudo cp work/vendor.raw  mnt/android/vendor.img  || true
+          [ -f work/product.raw ] && sudo cp work/product.raw mnt/android/product.img || true
+          [ -f work/boot-kernel ]        && sudo cp work/boot-kernel        mnt/android/kernel       || true
+          [ -f work/boot-ramdisk.img ]   && sudo cp work/boot-ramdisk.img   mnt/android/ramdisk.img  || true
+          [ -f work/boot-initrd.img ]    && sudo cp work/boot-initrd.img    mnt/android/initrd.img   || true
+
+          # Install GRUB EFI
+          sudo grub-install \
+            --target=x86_64-efi \
+            --efi-directory=mnt/efi \
+            --boot-directory=mnt/android/boot \
+            --removable \
+            --no-nvram
+
+          # GRUB config — Android x86 standard kernel cmdline
+          sudo mkdir -p mnt/android/boot/grub
+          sudo tee mnt/android/boot/grub/grub.cfg > /dev/null << 'GRUBCFG'
+          set default=0
+          set timeout=3
+
+          menuentry "Android-x86" {
+            search --set=root --label Android
+            linux  /kernel root=/dev/ram0 androidboot.hardware=android_x86_64 \
+                   androidboot.selinux=enforcing DATA=
+            initrd /ramdisk.img
+          }
+          GRUBCFG
+
+          sudo umount mnt/efi mnt/android
+          sudo rmdir  mnt/efi mnt/android
+          sudo losetup -d "$LOOP"
+
+      # ── Convert to qcow2 and checksum ───────────────────────────────────────
+      - name: Convert disk image to qcow2
         run: |
           mkdir -p image-cache
           qemu-img convert -O qcow2 -c \
-            work/${{ env.OUTPUT_IMAGE }} \
+            work/android11-disk.raw \
             image-cache/${{ env.OUTPUT_IMAGE }}
           qemu-img info image-cache/${{ env.OUTPUT_IMAGE }}
 
@@ -400,13 +495,27 @@ jobs:
 
       - name: Mount and spot-check injected files
         run: |
+          # Disk layout: GPT p1=EFI (FAT32), p2=Android data (ext4).
+          # system.img and vendor.img live as files on p2 and are loop-mounted.
           sudo modprobe nbd max_part=8
           sleep 1
           sudo qemu-nbd --connect=/dev/nbd0 image-cache/${{ env.OUTPUT_IMAGE }}
           sleep 2
-          sudo mkdir -p mnt/{system,vendor}
-          sudo mount /dev/nbd0p2 mnt/system || true
-          sudo mount /dev/nbd0p5 mnt/vendor || true
+          sudo partprobe /dev/nbd0
+          sleep 1
+
+          echo "=== Partition layout ==="
+          lsblk /dev/nbd0
+
+          sudo mkdir -p mnt/android mnt/system mnt/vendor
+          sudo mount /dev/nbd0p2 mnt/android
+
+          [ -f mnt/android/system.img ] \
+            && sudo mount -o loop,ro mnt/android/system.img mnt/system \
+            || echo "::warning::system.img not found on data partition"
+          [ -f mnt/android/vendor.img ] \
+            && sudo mount -o loop,ro mnt/android/vendor.img mnt/vendor \
+            || echo "No vendor.img — vendor checks skipped"
 
           echo "=== GApps presence ==="
           FAIL=0
@@ -434,9 +543,9 @@ jobs:
             FAIL=$((FAIL+1))
           fi
 
-          sudo umount mnt/system mnt/vendor 2>/dev/null || true
+          sudo umount mnt/system mnt/vendor mnt/android 2>/dev/null || true
           sudo qemu-nbd --disconnect /dev/nbd0 2>/dev/null || true
-          sudo rmdir mnt/system mnt/vendor 2>/dev/null || true
+          sudo rmdir mnt/system mnt/vendor mnt/android 2>/dev/null || true
 
           if [ "$FAIL" -gt 0 ]; then
             echo "::error::$FAIL static check(s) failed"
