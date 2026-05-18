@@ -19,6 +19,10 @@ on:
         description: 'Force full rebuild even if cache is valid'
         type: boolean
         default: false
+      source_img_url:
+        description: 'Override Bliss OS ISO URL (leave blank to auto-resolve latest from SourceForge)'
+        type: string
+        default: ''
       gapps_url:
         description: 'Override GApps download URL (leave blank for default)'
         type: string
@@ -34,9 +38,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Pinned source image — update SOURCE_IMG_SHA256 when moving to a new release
-  SOURCE_IMG_URL: "https://sourceforge.net/projects/blissos-x86/files/Official/BlissOS14/FOSS/Generic/Bliss-v14.10.3-x86_64-OFFICIAL-foss-20241012.iso/download"
-  SOURCE_IMG_SHA256: ""   # set this once you pin a specific release
+  BLISSOS_SF_PATH: "Official/BlissOS14/FOSS/Generic"
+  SOURCE_IMG_SHA256: ""   # set to a sha256 hex string to pin and verify a specific release
   GAPPS_URL_DEFAULT: "https://github.com/nicholasbuse/mindthegapps/releases/download/20231114/MindTheGapps-11.0.0-x86_64-20231114_112039.zip"
   GAPPS_SHA256: "REPLACE_WITH_REAL_SHA256"
   ARM_TRANS_COMMIT: "9324a8914b649b885dad6f2bfd14a67e5d1520bf"
@@ -48,10 +51,37 @@ jobs:
     name: Preflight checks
     runs-on: ubuntu-22.04
     outputs:
-      cache_key: ${{ steps.key.outputs.cache_key }}
-      gapps_url: ${{ steps.urls.outputs.gapps_url }}
+      cache_key:          ${{ steps.key.outputs.cache_key }}
+      gapps_url:          ${{ steps.urls.outputs.gapps_url }}
+      source_img_url:     ${{ steps.source.outputs.source_img_url }}
+      source_img_filename: ${{ steps.source.outputs.source_img_filename }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve Bliss OS ISO URL
+        id: source
+        run: |
+          if [ -n "${{ inputs.source_img_url }}" ]; then
+            # Manual override supplied via workflow_dispatch
+            url="${{ inputs.source_img_url }}"
+            # Derive filename from URL (last path component before /download)
+            filename=$(basename "$(dirname "$url")")
+            echo "source_img_url=${url}" >> $GITHUB_OUTPUT
+            echo "source_img_filename=${filename}" >> $GITHUB_OUTPUT
+            echo "Using manually provided URL: ${url}"
+          else
+            # Dynamically resolve the latest ISO from SourceForge
+            output=$(python3 scripts/lib/resolve-blissos-url.py \
+              --path "${{ env.BLISSOS_SF_PATH }}" \
+              --filter ".iso")
+            url=$(echo "$output" | grep '^url=' | cut -d= -f2-)
+            filename=$(echo "$output" | grep '^filename=' | cut -d= -f2-)
+            [ -n "$url" ] || { echo "::error::resolve-blissos-url.py returned no URL"; exit 1; }
+            echo "source_img_url=${url}" >> $GITHUB_OUTPUT
+            echo "source_img_filename=${filename}" >> $GITHUB_OUTPUT
+            echo "Resolved latest Bliss OS ISO: ${filename}"
+            echo "Download URL: ${url}"
+          fi
 
       - name: Resolve GApps URL
         id: urls
@@ -69,6 +99,7 @@ jobs:
           # A cache hit means we can skip the multi-hour build and reuse the
           # previously uploaded artifact.
           hash=$(echo -n \
+            "${{ steps.source.outputs.source_img_filename }}" \
             "${{ env.SOURCE_IMG_SHA256 }}" \
             "${{ steps.urls.outputs.gapps_url }}" \
             "${{ env.ARM_TRANS_COMMIT }}" \
@@ -153,14 +184,15 @@ jobs:
         id: source-cache
         with:
           path: source-image/
-          key: source-img-${{ env.SOURCE_IMG_SHA256 }}
+          key: source-img-${{ needs.preflight.outputs.source_img_filename }}
 
-      - name: Download Android x86_64 image
+      - name: Download Bliss OS ISO
         if: steps.source-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p source-image
+          echo "Downloading: ${{ needs.preflight.outputs.source_img_filename }}"
           curl -L --retry 5 --retry-delay 10 \
-            "${{ env.SOURCE_IMG_URL }}" \
+            "${{ needs.preflight.outputs.source_img_url }}" \
             -o source-image/source.img
           if [ -n "${{ env.SOURCE_IMG_SHA256 }}" ]; then
             echo "${{ env.SOURCE_IMG_SHA256 }}  source-image/source.img" | sha256sum -c
@@ -170,7 +202,7 @@ jobs:
           # Verify the download is actually an ISO, not an HTML redirect page
           file source-image/source.img
           file source-image/source.img | grep -qi "ISO 9660\|CD-ROM" \
-            || { echo "::error::Downloaded file is not an ISO — SourceForge may have served an HTML page. Check SOURCE_IMG_URL."; exit 1; }
+            || { echo "::error::Downloaded file is not an ISO — SourceForge may have served an HTML page. Check the resolved URL."; exit 1; }
 
       # ── Download & verify GApps ─────────────────────────────────────────
       - name: Cache GApps download
