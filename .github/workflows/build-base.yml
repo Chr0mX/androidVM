@@ -360,7 +360,8 @@ jobs:
             sudo mount -o loop,rw work/vendor.raw mnt/vendor
             echo "VENDOR_MNT=mnt/vendor" >> "$GITHUB_ENV"
           else
-            sudo mkdir -p mnt/system/vendor
+            # vendor is inside system.raw — the path may already exist (dir or symlink)
+            sudo test -e mnt/system/vendor || sudo mkdir -p mnt/system/vendor
             echo "VENDOR_MNT=mnt/system/vendor" >> "$GITHUB_ENV"
             echo "No separate vendor.img — using mnt/system/vendor"
           fi
