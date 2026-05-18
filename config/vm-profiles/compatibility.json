@@ -1,0 +1,11 @@
+{
+  "description": "Compatibility profile. Works on older hardware without OpenGL or KVM. Slowest option.",
+  "ram_mb": 2048,
+  "cpu_cores": 2,
+  "cpu_threads": 1,
+  "hugepages": false,
+  "gpu": "VGA",
+  "display": "gtk,gl=off",
+  "audio": "none",
+  "multithreaded_render": false
+}

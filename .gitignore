@@ -17,6 +17,7 @@ mnt/
 source-image/
 work/
 image-cache/
+cache/
 
 # Runtime state
 /tmp/

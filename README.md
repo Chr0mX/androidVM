@@ -17,9 +17,66 @@ curl -fsSL https://raw.githubusercontent.com/Chr0mX/androidVM/main/install.sh \
 # Cloned locally with flags:
 bash install.sh --profile samsung-s23-eu --boot
 
-# Step by step after install:
-bash scripts/set-profile.sh pixel6a-bp1a --rebuild --boot --check
+# After install — use the unified CLI:
+android-vm start                              # start with defaults
+android-vm start pixel7-ap1a --vm-profile performance
+android-vm doctor                             # verify everything is set up
 ```
+
+## android-vm CLI
+
+The unified `android-vm` command is installed to `/usr/local/bin` by the installer.
+
+```bash
+android-vm start [device-profile] [--vm-profile <name>]
+    # Start the VM. Defaults come from config/defaults.json.
+
+android-vm stop [device-profile]
+    # Stop a running VM (SIGTERM → SIGKILL after 10 s).
+
+android-vm reset [device-profile]
+    # Factory-reset userdata (delete + recreate the userdata volume).
+
+android-vm update
+    # git pull the repo and refresh the intermediate image.
+
+android-vm doctor
+    # Check all dependencies, KVM, images, disk space, and RAM.
+
+android-vm profiles
+    # List available device profiles and VM hardware profiles.
+```
+
+**Global flag:** `--debug` enables `bash -x` trace mode on any subcommand.
+
+## VM Hardware Profiles
+
+VM hardware profiles control QEMU resource allocation and are independent of device identity profiles. Profiles live in `config/vm-profiles/*.json`.
+
+| Profile | RAM | Cores | GPU | Use case |
+|---|---|---|---|---|
+| `performance` | 6144 MB | 6 | virtio-vga-gl | 8+ GB RAM, host OpenGL required |
+| `balanced` | 4096 MB | 4 | virtio-vga | 6+ GB RAM, recommended default |
+| `compatibility` | 2048 MB | 2 | VGA (std) | Older hardware, no OpenGL/KVM needed |
+| `lowram` | 2048 MB | 2 | virtio-vga | Systems with ≤ 4 GB total RAM |
+
+```bash
+android-vm start pixel6a-bp1a --vm-profile compatibility
+# or via boot.sh directly:
+bash scripts/boot.sh pixel6a-bp1a --vm-profile performance
+```
+
+## SPICE Remote Display
+
+Run the VM headlessly and stream the display to a SPICE client:
+
+```bash
+bash scripts/boot.sh pixel6a-bp1a --spice
+# then connect from another terminal or machine:
+remote-viewer spice://localhost:5900
+```
+
+Install a SPICE client: `sudo apt install virt-viewer` (provides `remote-viewer`).
 
 ### Env var overrides (for the curl pipe case)
 
@@ -45,11 +102,23 @@ pip3 install jsonschema
 
 ```
 workspace/
-├── base/               # Master read-only image — never boot directly
-├── intermediate/       # GApps + ARM trans baked in, still read-only
-├── builds/             # Final per-profile artifacts  ← boot these
-├── userdata/           # Per-profile userdata volumes (8 GB each)
-├── profiles/           # JSON device identity profiles
+├── android-vm              # Unified CLI (symlinked to /usr/local/bin)
+├── install.sh              # One-liner installer
+├── base/                   # Master read-only image — never boot directly
+├── intermediate/           # GApps + ARM trans baked in, still read-only
+├── builds/                 # Final per-profile artifacts  ← boot these
+├── userdata/               # Per-profile userdata volumes (8 GB each)
+├── run/                    # Runtime PID files (gitignored)
+├── cache/                  # Download cache for split archives (gitignored)
+├── config/
+│   ├── defaults.json           # Default VM and port settings
+│   ├── device-spoof.json       # Device identity spoofing settings
+│   └── vm-profiles/
+│       ├── performance.json    # 6 GB RAM, 6 cores, virtio-vga-gl
+│       ├── balanced.json       # 4 GB RAM, 4 cores, virtio-vga  (default)
+│       ├── compatibility.json  # 2 GB RAM, 2 cores, VGA (no OpenGL)
+│       └── lowram.json         # 2 GB RAM, 2 cores, virtio-vga (no OpenGL)
+├── profiles/               # JSON device identity profiles
 │   ├── schema.json
 │   ├── pixel6a-bp1a.json
 │   ├── pixel7-ap1a.json
@@ -60,6 +129,8 @@ workspace/
 │   ├── boot.sh                 # Launch VM in QEMU/KVM
 │   ├── verify.sh               # ADB-based verification
 │   └── lib/
+│       ├── detect-hardware.sh      # CPU/RAM/KVM detection helpers
+│       ├── fetch-release.sh        # GitHub API downloader (split-archive aware)
 │       ├── patch-props.py          # Deterministic build.prop patcher
 │       ├── profile-validator.py    # JSON schema + consistency checks
 │       ├── inject-gapps.sh         # GApps offline injection

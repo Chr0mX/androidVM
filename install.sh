@@ -95,6 +95,7 @@ while [[ $# -gt 0 ]]; do
     --boot)         DO_BOOT=true;         shift   ;;
     --skip-verify)  SKIP_VERIFY=true;     shift   ;;
     --no-download)  NO_DOWNLOAD=true;     shift   ;;
+    --debug)        set -x;              shift   ;;
     -h|--help)      usage; exit 0         ;;
     *) die "Unknown argument: $1" ;;
   esac
@@ -127,8 +128,24 @@ ARCH=$(uname -m)
 [ "$ARCH" = "x86_64" ] || die "Requires x86_64 host. Detected: $ARCH"
 ok "Architecture: x86_64"
 
+CPU_VENDOR="unknown"
+if grep -q 'GenuineIntel' /proc/cpuinfo; then
+  CPU_VENDOR="intel"
+elif grep -q 'AuthenticAMD' /proc/cpuinfo; then
+  CPU_VENDOR="amd"
+fi
+
 if grep -qE 'vmx|svm' /proc/cpuinfo; then
-  ok "CPU virtualisation extensions detected"
+  ok "CPU virtualisation extensions detected (${CPU_VENDOR})"
+  if [ "$CPU_VENDOR" = "intel" ]; then
+    sudo modprobe kvm_intel 2>/dev/null \
+      && log "Loaded kvm_intel module" \
+      || warn "modprobe kvm_intel failed — may already be loaded"
+  elif [ "$CPU_VENDOR" = "amd" ]; then
+    sudo modprobe kvm_amd 2>/dev/null \
+      && log "Loaded kvm_amd module" \
+      || warn "modprobe kvm_amd failed — may already be loaded"
+  fi
 else
   warn "vmx/svm not found in /proc/cpuinfo — KVM will not be available"
   warn "The VM will run via QEMU TCG emulation (much slower)"
@@ -138,14 +155,15 @@ if [ -e /dev/kvm ]; then
   ok "KVM device available: /dev/kvm"
   KVM_ENABLED=true
 else
-  warn "/dev/kvm not available. Check: sudo modprobe kvm_intel (or kvm_amd)"
+  warn "/dev/kvm not available — attempting to load KVM module"
   KVM_ENABLED=false
 fi
 
-if $KVM_ENABLED && ! groups | grep -q kvm; then
-  warn "Current user is not in the 'kvm' group."
-  warn "Run: sudo usermod -aG kvm \$USER   then log out and back in"
-  warn "Continuing anyway — you may need to run the VM as root"
+if $KVM_ENABLED && [ "${USER:-root}" != "root" ] && ! groups | grep -q '\bkvm\b'; then
+  log "Adding ${USER} to the kvm group..."
+  sudo usermod -aG kvm "$USER" \
+    && warn "Added to kvm group — you must log out and back in for this to take effect" \
+    || warn "Failed to add to kvm group — run: sudo usermod -aG kvm \$USER"
 fi
 
 AVAIL_GB=$(df --output=avail -BG "${HOME}" | tail -1 | tr -d 'G ')
@@ -174,8 +192,9 @@ install_apt() {
     android-tools-adb \
     simg2img img2simg \
     e2fsprogs python3 python3-pip \
-    jq curl rsync git \
-    ovmf p7zip-full ca-certificates
+    jq curl rsync git wget \
+    ovmf p7zip-full ca-certificates \
+    bridge-utils lzip squashfs-tools parted unzip tar
   pip3 install jsonschema --quiet --break-system-packages 2>/dev/null \
     || pip3 install jsonschema --quiet
 }
@@ -185,8 +204,9 @@ install_dnf() {
     qemu-system-x86 qemu-img qemu-kvm \
     android-tools \
     e2fsprogs python3 python3-pip \
-    jq curl rsync git \
-    edk2-ovmf p7zip
+    jq curl rsync git wget \
+    edk2-ovmf p7zip \
+    bridge-utils lzip squashfs-tools parted unzip tar
   pip3 install jsonschema --quiet
 }
 
@@ -229,11 +249,29 @@ fi
 cd "$WORKSPACE_DIR"
 
 mkdir -p base intermediate builds profiles scripts/lib arm-trans gapps \
-         logs userdata mnt/{system,vendor,product}
+         logs userdata mnt/{system,vendor,product} run cache \
+         config/vm-profiles
 ok "Workspace ready at ${WORKSPACE_DIR}"
 
 find scripts/ -name '*.sh' -exec chmod +x {} \;
 chmod +x scripts/set-profile.sh scripts/verify.sh 2>/dev/null || true
+
+# Source hardware detection helpers (available after clone)
+if [ -f "scripts/lib/detect-hardware.sh" ]; then
+  # shellcheck source=scripts/lib/detect-hardware.sh
+  . "scripts/lib/detect-hardware.sh"
+fi
+
+# Install android-vm CLI system-wide
+if [ -f "${WORKSPACE_DIR}/android-vm" ]; then
+  chmod +x "${WORKSPACE_DIR}/android-vm"
+  if sudo ln -sf "${WORKSPACE_DIR}/android-vm" /usr/local/bin/android-vm 2>/dev/null; then
+    ok "android-vm command installed to /usr/local/bin/android-vm"
+  else
+    warn "Could not install to /usr/local/bin — run manually:"
+    warn "  sudo ln -sf ${WORKSPACE_DIR}/android-vm /usr/local/bin/android-vm"
+  fi
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PHASE 4 — Fetch or build the intermediate base image
@@ -256,30 +294,44 @@ else
     fi
     bash scripts/build-intermediate.sh
   else
-    log "Downloading pre-built intermediate image from GitHub Releases..."
-    log "URL: ${BASE_IMAGE_RELEASE}/android11-gapps-arm.qcow2"
-    curl -L --retry 5 --retry-delay 10 \
-         --progress-bar \
-         "${BASE_IMAGE_RELEASE}/android11-gapps-arm.qcow2" \
-         -o "${INTERMEDIATE}.tmp"
-
-    if curl -fsSL "${BASE_IMAGE_RELEASE}/android11-gapps-arm.qcow2.sha256" \
-             -o /tmp/image.sha256 2>/dev/null; then
-      log "Verifying checksum..."
-      EXPECTED=$(awk '{print $1}' /tmp/image.sha256)
-      ACTUAL=$(sha256sum "${INTERMEDIATE}.tmp" | awk '{print $1}')
-      if [ "$EXPECTED" = "$ACTUAL" ]; then
-        ok "Checksum verified"
-      else
-        rm -f "${INTERMEDIATE}.tmp"
-        die "Checksum mismatch! Expected: ${EXPECTED}  Got: ${ACTUAL}"
-      fi
+    if [ -f "scripts/lib/fetch-release.sh" ]; then
+      log "Downloading intermediate image via GitHub API (supports split archives + resume)..."
+      OWNER_REPO=$(echo "$REPO_URL" \
+        | sed 's|.*github\.com[:/]\(.*\)\.git$|\1|; s|.*github\.com[:/]\(.*\)|\1|')
+      ROOT="${WORKSPACE_DIR}" bash scripts/lib/fetch-release.sh \
+        "$OWNER_REPO" "*.qcow2*" "intermediate/" \
+        || {
+          warn "GitHub API download failed — falling back to direct URL"
+          curl -L --retry 5 --retry-delay 10 --progress-bar \
+            "${BASE_IMAGE_RELEASE}/android11-gapps-arm.qcow2" \
+            -o "${INTERMEDIATE}.tmp"
+          mv "${INTERMEDIATE}.tmp" "$INTERMEDIATE"
+        }
     else
-      warn "No .sha256 file found at release URL — skipping checksum verification"
-    fi
+      log "Downloading pre-built intermediate image from GitHub Releases..."
+      curl -L --retry 5 --retry-delay 10 \
+           --progress-bar \
+           "${BASE_IMAGE_RELEASE}/android11-gapps-arm.qcow2" \
+           -o "${INTERMEDIATE}.tmp"
 
-    mv "${INTERMEDIATE}.tmp" "$INTERMEDIATE"
-    ok "Intermediate image ready ($(du -sh "$INTERMEDIATE" | cut -f1))"
+      if curl -fsSL "${BASE_IMAGE_RELEASE}/android11-gapps-arm.qcow2.sha256" \
+               -o /tmp/image.sha256 2>/dev/null; then
+        log "Verifying checksum..."
+        EXPECTED=$(awk '{print $1}' /tmp/image.sha256)
+        ACTUAL=$(sha256sum "${INTERMEDIATE}.tmp" | awk '{print $1}')
+        if [ "$EXPECTED" = "$ACTUAL" ]; then
+          ok "Checksum verified"
+        else
+          rm -f "${INTERMEDIATE}.tmp"
+          die "Checksum mismatch! Expected: ${EXPECTED}  Got: ${ACTUAL}"
+        fi
+      else
+        warn "No .sha256 file found at release URL — skipping checksum verification"
+      fi
+
+      mv "${INTERMEDIATE}.tmp" "$INTERMEDIATE"
+    fi
+    [ -f "$INTERMEDIATE" ] && ok "Intermediate image ready ($(du -sh "$INTERMEDIATE" | cut -f1))"
   fi
 fi
 
@@ -393,31 +445,47 @@ ${GRN}Everything is set up in: ${WORKSPACE_DIR}${NC}
 
 Quick reference:
 
-  ${DIM}# Build a profile image and boot it${NC}
-  cd ${WORKSPACE_DIR}
-  bash scripts/set-profile.sh ${STARTER_PROFILE} --rebuild --boot --check
+  ${DIM}# Start the VM (unified CLI)${NC}
+  android-vm start ${STARTER_PROFILE}
+  android-vm start ${STARTER_PROFILE} --vm-profile performance
 
-  ${DIM}# Boot an existing image${NC}
-  bash scripts/boot.sh ${STARTER_PROFILE}
+  ${DIM}# Stop / reset userdata${NC}
+  android-vm stop ${STARTER_PROFILE}
+  android-vm reset ${STARTER_PROFILE}
+
+  ${DIM}# Diagnose issues${NC}
+  android-vm doctor
+
+  ${DIM}# List available profiles${NC}
+  android-vm profiles
+
+  ${DIM}# Build a profile image (required before first start)${NC}
+  cd ${WORKSPACE_DIR}
+  bash scripts/set-profile.sh ${STARTER_PROFILE} --rebuild
 
   ${DIM}# Connect via ADB${NC}
   adb connect localhost:5555
 
-  ${DIM}# Switch to a different profile${NC}
-  bash scripts/set-profile.sh pixel7-ap1a --rebuild --boot --check
-
-  ${DIM}# Run verification against a live VM${NC}
-  bash scripts/verify.sh profiles/${STARTER_PROFILE}.json
-
-  ${DIM}# Reset userdata (factory state) without rebuilding the image${NC}
-  qemu-img create -f qcow2 userdata/userdata-${STARTER_PROFILE}.qcow2 8G
-
 Workspace layout:
+  android-vm     → unified CLI (also at /usr/local/bin/android-vm)
   base/          → read-only source image (never boot this)
   intermediate/  → GApps + ARM trans baked in (never boot this)
   builds/        → per-profile bootable images  ← boot these
   userdata/      → per-profile userdata volumes
-  profiles/      → JSON identity profiles
+  profiles/      → JSON device identity profiles
+  config/        → defaults.json, device-spoof.json, vm-profiles/
   logs/          → build and verify logs
 
 EOF
+
+# Hardware summary
+if command -v detect_ram_mb &>/dev/null; then
+  TOTAL_MB=$(detect_ram_mb)
+  TOTAL_GB=$(( TOTAL_MB / 1024 ))
+  if   [ "$TOTAL_GB" -ge 8 ]; then REC_VM_PROFILE="performance"
+  elif [ "$TOTAL_GB" -ge 6 ]; then REC_VM_PROFILE="balanced"
+  elif [ "$TOTAL_GB" -ge 4 ]; then REC_VM_PROFILE="balanced"
+  else                              REC_VM_PROFILE="lowram"; fi
+  printf "  Host RAM: %d GB   Cores: %s   Recommended vm-profile: %s\n\n" \
+    "$TOTAL_GB" "$(detect_cores)" "$REC_VM_PROFILE"
+fi

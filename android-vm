@@ -1,0 +1,417 @@
+#!/usr/bin/env bash
+# android-vm — unified Android x86 VM manager
+#
+# Usage: android-vm <subcommand> [args] [--debug]
+#
+# Subcommands:
+#   start [device-profile] [--vm-profile <name>]
+#   stop  [device-profile]
+#   reset [device-profile]
+#   update
+#   doctor
+#   profiles
+set -euo pipefail
+
+# Resolve real path so symlinks from /usr/local/bin work correctly
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+
+# ── Colour helpers ────────────────────────────────────────────────────────────
+if [ -t 1 ]; then
+  RED='\033[0;31m' YEL='\033[0;33m' GRN='\033[0;32m'
+  BLU='\033[0;34m' DIM='\033[2m'    NC='\033[0m'
+else
+  RED='' YEL='' GRN='' BLU='' DIM='' NC=''
+fi
+
+log()  { printf "${BLU}[android-vm]${NC} %s\n" "$*"; }
+ok()   { printf "${GRN}[  ok  ]${NC} %s\n" "$*"; }
+warn() { printf "${YEL}[ warn ]${NC} %s\n" "$*" >&2; }
+die()  { printf "${RED}[ FAIL ]${NC} %s\n" "$*" >&2; exit 1; }
+
+# ── Early requirements ────────────────────────────────────────────────────────
+command -v jq &>/dev/null || die "jq is required but not found. Install it first."
+
+# ── Debug mode (check before subcommand dispatch) ─────────────────────────────
+for _arg in "$@"; do
+  [ "$_arg" = "--debug" ] && set -x
+done
+unset _arg
+
+# ── Config helpers ────────────────────────────────────────────────────────────
+DEFAULTS_JSON="${ROOT}/config/defaults.json"
+SPOOF_JSON="${ROOT}/config/device-spoof.json"
+
+cfg_get() {
+  local key="$1" fallback="${2:-}"
+  jq -r "${key} // \"${fallback}\"" "$DEFAULTS_JSON" 2>/dev/null || echo "$fallback"
+}
+
+spoof_get() {
+  local key="$1" fallback="${2:-}"
+  jq -r "${key} // \"${fallback}\"" "$SPOOF_JSON" 2>/dev/null || echo "$fallback"
+}
+
+default_device_profile() {
+  # device-spoof.json takes precedence for identity-related default
+  local p
+  p=$(spoof_get '.default_profile' "")
+  [ -z "$p" ] && p=$(cfg_get '.default_device_profile' "pixel6a-bp1a")
+  echo "$p"
+}
+
+default_vm_profile() {
+  cfg_get '.default_vm_profile' "balanced"
+}
+
+# ── Usage ─────────────────────────────────────────────────────────────────────
+usage() {
+  cat <<'USAGE'
+android-vm — Android x86 VM manager
+
+SUBCOMMANDS
+  start [device-profile] [--vm-profile <name>]
+      Start the VM. Uses config/defaults.json and config/device-spoof.json
+      defaults when arguments are omitted.
+
+  stop [device-profile]
+      Stop a running VM gracefully (SIGTERM, SIGKILL after 10 s).
+
+  reset [device-profile]
+      Delete and recreate the userdata volume (factory reset).
+      Stops the VM first if it is running.
+
+  update
+      git pull the repo and refresh the intermediate image from GitHub Releases.
+
+  doctor
+      Check all dependencies, KVM, images, and disk space.
+
+  profiles
+      List available device profiles and VM hardware profiles.
+
+FLAGS (global)
+  --debug    Enable bash -x trace mode
+  -h, --help Show this help
+
+EXAMPLES
+  android-vm start
+  android-vm start pixel7-ap1a
+  android-vm start pixel7-ap1a --vm-profile performance
+  android-vm stop
+  android-vm stop pixel6a-bp1a
+  android-vm reset
+  android-vm update
+  android-vm doctor
+  android-vm profiles
+USAGE
+}
+
+# ── cmd_start ─────────────────────────────────────────────────────────────────
+cmd_start() {
+  local device_profile vm_profile
+  device_profile=$(default_device_profile)
+  vm_profile=$(default_vm_profile)
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --vm-profile) vm_profile="$2"; shift 2 ;;
+      --debug)      shift ;;
+      -*) die "Unknown flag for start: $1" ;;
+      *)  device_profile="$1"; shift ;;
+    esac
+  done
+
+  local pid_file="${ROOT}/run/${device_profile}.pid"
+  mkdir -p "${ROOT}/run"
+
+  # Stale/active PID check
+  if [ -f "$pid_file" ]; then
+    local existing_pid
+    existing_pid=$(cat "$pid_file")
+    if kill -0 "$existing_pid" 2>/dev/null; then
+      warn "VM for '${device_profile}' is already running (PID ${existing_pid})"
+      warn "Use 'android-vm stop ${device_profile}' first"
+      exit 1
+    else
+      log "Removing stale PID file"
+      rm -f "$pid_file"
+    fi
+  fi
+
+  local img="${ROOT}/builds/android11-${device_profile}-latest.qcow2"
+  if [ ! -f "$img" ]; then
+    die "No image found for device profile '${device_profile}'.
+    Build it first with: bash scripts/set-profile.sh ${device_profile}"
+  fi
+
+  log "Starting VM: device=${device_profile}  vm-profile=${vm_profile}"
+  bash "${ROOT}/scripts/boot.sh" "$device_profile" --vm-profile "$vm_profile"
+}
+
+# ── cmd_stop ──────────────────────────────────────────────────────────────────
+cmd_stop() {
+  local device_profile="${1:-$(default_device_profile)}"
+  # strip flags passed through
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --debug) shift ;;
+      -*) die "Unknown flag for stop: $1" ;;
+      *)  device_profile="$1"; shift ;;
+    esac
+  done
+
+  local pid_file="${ROOT}/run/${device_profile}.pid"
+
+  if [ ! -d "${ROOT}/run" ] || [ ! -f "$pid_file" ]; then
+    warn "No PID file for '${device_profile}' — VM may not be running"
+    exit 1
+  fi
+
+  local pid
+  pid=$(cat "$pid_file")
+
+  if kill -0 "$pid" 2>/dev/null; then
+    log "Stopping VM for '${device_profile}' (PID ${pid})..."
+    kill "$pid"
+    local n=0
+    while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 10 ]; do
+      sleep 1; n=$(( n + 1 ))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      warn "VM did not stop cleanly — sending SIGKILL"
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pid_file"
+    ok "VM stopped"
+  else
+    warn "PID ${pid} is not running — removing stale PID file"
+    rm -f "$pid_file"
+  fi
+}
+
+# ── cmd_reset ─────────────────────────────────────────────────────────────────
+cmd_reset() {
+  local device_profile="${1:-$(default_device_profile)}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --debug) shift ;;
+      -*) die "Unknown flag for reset: $1" ;;
+      *)  device_profile="$1"; shift ;;
+    esac
+  done
+
+  local pid_file="${ROOT}/run/${device_profile}.pid"
+  if [ -f "$pid_file" ]; then
+    log "VM appears to be running — stopping first"
+    cmd_stop "$device_profile"
+  fi
+
+  local udata="${ROOT}/userdata/userdata-${device_profile}.qcow2"
+  local size
+  size=$(cfg_get '.userdata_size' "8G")
+
+  if [ -f "$udata" ]; then
+    log "Deleting userdata: $udata"
+    rm -f "$udata"
+  fi
+  qemu-img create -f qcow2 "$udata" "$size"
+  ok "Userdata reset for '${device_profile}' (${size}, empty)"
+}
+
+# ── cmd_update ────────────────────────────────────────────────────────────────
+cmd_update() {
+  log "Pulling latest changes..."
+  if ! git -C "$ROOT" pull --ff-only; then
+    warn "git pull failed — the repo may be in a detached HEAD state"
+    warn "Run: git -C ${ROOT} fetch origin && git -C ${ROOT} checkout main && git -C ${ROOT} pull"
+    exit 1
+  fi
+  ok "Repo updated"
+
+  local fetch_script="${ROOT}/scripts/lib/fetch-release.sh"
+  if [ -f "$fetch_script" ]; then
+    local remote_url owner_repo=""
+    remote_url=$(git -C "$ROOT" remote get-url origin 2>/dev/null || echo "")
+    if echo "$remote_url" | grep -q "github.com"; then
+      owner_repo=$(echo "$remote_url" \
+        | sed 's|.*github\.com[:/]\(.*\)\.git$|\1|; s|.*github\.com[:/]\(.*\)|\1|')
+    fi
+    if [ -n "$owner_repo" ]; then
+      log "Checking for intermediate image updates (${owner_repo})..."
+      bash "$fetch_script" "$owner_repo" "*.qcow2*" "${ROOT}/intermediate/" \
+        || warn "Image update failed — existing image unchanged"
+    else
+      warn "Cannot determine GitHub repo from remote URL — skipping image update"
+    fi
+  else
+    warn "fetch-release.sh not available — skipping image update"
+  fi
+}
+
+# ── cmd_doctor ────────────────────────────────────────────────────────────────
+cmd_doctor() {
+  local fail=0
+
+  check_ok()   { printf "  ${GRN}✓${NC} %s\n" "$*"; }
+  check_fail() { printf "  ${RED}✗${NC} %s\n" "$*"; fail=$(( fail + 1 )); }
+  check_warn() { printf "  ${YEL}!${NC} %s\n" "$*"; }
+
+  # Source hardware helpers (optional — don't die if missing)
+  local hw_script="${ROOT}/scripts/lib/detect-hardware.sh"
+  # shellcheck source=scripts/lib/detect-hardware.sh
+  [ -f "$hw_script" ] && . "$hw_script"
+
+  printf "\n${DIM}━━━ Dependencies ━━━${NC}\n"
+  for bin in qemu-system-x86_64 qemu-img qemu-nbd adb jq python3 git curl; do
+    if command -v "$bin" &>/dev/null; then
+      check_ok "${bin}  ($(command -v "$bin"))"
+    else
+      check_fail "${bin} not found"
+    fi
+  done
+
+  local ovmf_path
+  ovmf_path=$(cfg_get '.ovmf_path' "/usr/share/OVMF/OVMF_CODE.fd")
+  if [ -f "$ovmf_path" ]; then
+    check_ok "OVMF EFI firmware  (${ovmf_path})"
+  else
+    check_fail "OVMF not found at ${ovmf_path}  — install: ovmf (apt) or edk2-ovmf (dnf)"
+  fi
+
+  printf "\n${DIM}━━━ KVM / Virtualisation ━━━${NC}\n"
+  if grep -qE 'vmx|svm' /proc/cpuinfo; then
+    local vendor="unknown"
+    command -v detect_cpu_vendor &>/dev/null && vendor=$(detect_cpu_vendor)
+    check_ok "CPU virtualisation extensions (${vendor})"
+  else
+    check_warn "No vmx/svm in /proc/cpuinfo — KVM unavailable, TCG fallback only"
+  fi
+
+  if [ -e /dev/kvm ]; then
+    check_ok "/dev/kvm available"
+    if groups 2>/dev/null | grep -q '\bkvm\b' || [ "${USER:-root}" = "root" ]; then
+      check_ok "KVM group access confirmed"
+    else
+      check_warn "User not in 'kvm' group — run: sudo usermod -aG kvm \$USER  then re-login"
+    fi
+  else
+    check_fail "/dev/kvm missing — load module: sudo modprobe kvm_intel  or  kvm_amd"
+  fi
+
+  printf "\n${DIM}━━━ Images ━━━${NC}\n"
+  local intermediate="${ROOT}/intermediate/android11-gapps-arm.qcow2"
+  if [ -f "$intermediate" ]; then
+    local sz
+    sz=$(du -sh "$intermediate" 2>/dev/null | cut -f1)
+    check_ok "Intermediate image  (${sz})"
+  else
+    check_fail "Intermediate image missing: ${intermediate}"
+    check_warn "Download with: android-vm update  or  bash install.sh"
+  fi
+
+  local found_builds=0
+  for img in "${ROOT}"/builds/android11-*-latest.qcow2; do
+    [ -L "$img" ] || continue
+    local pname
+    pname=$(basename "$img" | sed 's/android11-//; s/-latest\.qcow2//')
+    check_ok "Build image: ${pname}"
+    found_builds=$(( found_builds + 1 ))
+  done
+  [ "$found_builds" -eq 0 ] && check_warn "No profile builds found — run: bash scripts/set-profile.sh <name>"
+
+  printf "\n${DIM}━━━ Config ━━━${NC}\n"
+  [ -f "$DEFAULTS_JSON" ] && check_ok "config/defaults.json"      || check_warn "config/defaults.json missing — using built-in defaults"
+  [ -f "$SPOOF_JSON"    ] && check_ok "config/device-spoof.json"  || check_warn "config/device-spoof.json missing — using built-in defaults"
+  local vp_count
+  vp_count=$(find "${ROOT}/config/vm-profiles" -name '*.json' 2>/dev/null | wc -l)
+  if [ "$vp_count" -ge 4 ]; then
+    check_ok "VM profiles: ${vp_count} found"
+  else
+    check_warn "VM profiles: only ${vp_count} found (expected 4)"
+  fi
+
+  printf "\n${DIM}━━━ Disk Space ━━━${NC}\n"
+  local avail_gb
+  avail_gb=$(df --output=avail -BG "${ROOT}" 2>/dev/null | tail -1 | tr -d 'G ' || echo "0")
+  if [ "${avail_gb:-0}" -ge 25 ]; then
+    check_ok "Disk space: ${avail_gb} GB available"
+  elif [ "${avail_gb:-0}" -ge 10 ]; then
+    check_warn "Disk space: ${avail_gb} GB — may be tight for building"
+  else
+    check_fail "Disk space: ${avail_gb} GB — need at least 10 GB"
+  fi
+
+  printf "\n${DIM}━━━ RAM ━━━${NC}\n"
+  if command -v detect_ram_mb &>/dev/null; then
+    local total_mb total_gb recommended
+    total_mb=$(detect_ram_mb)
+    total_gb=$(( total_mb / 1024 ))
+    if   [ "$total_gb" -ge 8 ]; then recommended="performance"
+    elif [ "$total_gb" -ge 6 ]; then recommended="balanced"
+    elif [ "$total_gb" -ge 4 ]; then recommended="balanced"
+    else                              recommended="lowram or compatibility"; fi
+    check_ok "RAM: ${total_gb} GB total — recommended vm-profile: ${recommended}"
+  else
+    check_warn "detect-hardware.sh not available — cannot assess RAM"
+  fi
+
+  printf "\n"
+  if [ "$fail" -eq 0 ]; then
+    printf "${GRN}All checks passed.${NC}\n\n"
+  else
+    printf "${RED}${fail} check(s) failed — fix issues above before running the VM.${NC}\n\n"
+    exit 1
+  fi
+}
+
+# ── cmd_profiles ──────────────────────────────────────────────────────────────
+cmd_profiles() {
+  local default_dev default_vm
+  default_dev=$(default_device_profile)
+  default_vm=$(default_vm_profile)
+
+  printf "\n${DIM}━━━ Device Profiles  (Android identity spoofing) ━━━${NC}\n"
+  for f in "${ROOT}"/profiles/*.json; do
+    [ "$(basename "$f")" = "schema.json" ] && continue
+    [ -f "$f" ] || continue
+    local id desc built=""
+    id=$(jq -r '.meta.id // "?"' "$f" 2>/dev/null)
+    desc=$(jq -r '.meta.description // ""' "$f" 2>/dev/null)
+    [ -L "${ROOT}/builds/android11-${id}-latest.qcow2" ] && built=" ${GRN}[built]${NC}"
+    [ "$id" = "$default_dev" ] && built="${built} ${YEL}(default)${NC}"
+    printf "  ${BLU}%-22s${NC} %s%b\n" "$id" "$desc" "$built"
+  done
+
+  printf "\n${DIM}━━━ VM Hardware Profiles ━━━${NC}\n"
+  for f in "${ROOT}"/config/vm-profiles/*.json; do
+    [ -f "$f" ] || continue
+    local name desc ram cores threads
+    name=$(basename "$f" .json)
+    desc=$(jq -r '.description' "$f" 2>/dev/null)
+    ram=$(jq -r '.ram_mb' "$f" 2>/dev/null)
+    cores=$(jq -r '.cpu_cores' "$f" 2>/dev/null)
+    threads=$(jq -r '.cpu_threads' "$f" 2>/dev/null)
+    local marker=""
+    [ "$name" = "$default_vm" ] && marker=" ${YEL}(default)${NC}"
+    printf "  ${BLU}%-16s${NC} %sMB  %sc/%st  %s%b\n" \
+      "$name" "$ram" "$cores" "$threads" "$desc" "$marker"
+  done
+  printf "\n"
+}
+
+# ── Dispatch ──────────────────────────────────────────────────────────────────
+CMD="${1:-help}"
+shift || true
+
+case "$CMD" in
+  start)    cmd_start    "$@" ;;
+  stop)     cmd_stop     "$@" ;;
+  reset)    cmd_reset    "$@" ;;
+  update)   cmd_update   "$@" ;;
+  doctor)   cmd_doctor   "$@" ;;
+  profiles) cmd_profiles "$@" ;;
+  help|-h|--help) usage; exit 0 ;;
+  --debug)  echo "Pass --debug after the subcommand, e.g.: android-vm start --debug"; exit 1 ;;
+  *) die "Unknown subcommand: '${CMD}'. Run 'android-vm help' for usage." ;;
+esac

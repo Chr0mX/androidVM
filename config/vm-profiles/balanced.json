@@ -1,0 +1,11 @@
+{
+  "description": "Balanced profile. Requires 6+ GB RAM, 4+ CPU cores, and OpenGL host support. Recommended default.",
+  "ram_mb": 4096,
+  "cpu_cores": 4,
+  "cpu_threads": 2,
+  "hugepages": false,
+  "gpu": "virtio-vga",
+  "display": "gtk,gl=on",
+  "audio": "pa",
+  "multithreaded_render": false
+}

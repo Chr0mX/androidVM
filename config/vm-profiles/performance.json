@@ -1,0 +1,11 @@
+{
+  "description": "High-performance profile. Requires 8+ GB RAM, 6+ CPU cores, OpenGL host support, and PulseAudio.",
+  "ram_mb": 6144,
+  "cpu_cores": 6,
+  "cpu_threads": 2,
+  "hugepages": true,
+  "gpu": "virtio-vga-gl",
+  "display": "gtk,gl=on",
+  "audio": "pa",
+  "multithreaded_render": true
+}

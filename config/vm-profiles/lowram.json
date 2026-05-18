@@ -1,0 +1,11 @@
+{
+  "description": "Low RAM profile for systems with 4 GB or less total RAM. Uses virtio GPU without OpenGL.",
+  "ram_mb": 2048,
+  "cpu_cores": 2,
+  "cpu_threads": 1,
+  "hugepages": false,
+  "gpu": "virtio-vga",
+  "display": "gtk,gl=off",
+  "audio": "none",
+  "multithreaded_render": false
+}

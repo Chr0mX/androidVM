@@ -1,0 +1,7 @@
+{
+  "default_device_profile": "pixel6a-bp1a",
+  "default_vm_profile": "balanced",
+  "adb_port": 5555,
+  "userdata_size": "8G",
+  "ovmf_path": "/usr/share/OVMF/OVMF_CODE.fd"
+}
