@@ -536,6 +536,27 @@ jobs:
           path: image-cache/
           key: ${{ needs.preflight.outputs.cache_key }}
 
+      # ── Split if image exceeds GitHub's 2 GB per-asset limit ────────────
+      # Cache is saved first (unsplit) so validate-artifact can qemu-img check
+      # the whole file. Split parts are only used for the release upload.
+      - name: Split large image for release upload
+        id: split
+        run: |
+          SIZE=$(stat -c%s image-cache/${{ env.OUTPUT_IMAGE }})
+          echo "Image size: $(( SIZE / 1024 / 1024 )) MB"
+          if [ "$SIZE" -gt 1990000000 ]; then
+            echo "Splitting into 1.9 GB parts for GitHub release upload..."
+            split -b 1900M \
+              "image-cache/${{ env.OUTPUT_IMAGE }}" \
+              "image-cache/${{ env.OUTPUT_IMAGE }}.part-"
+            rm "image-cache/${{ env.OUTPUT_IMAGE }}"
+            ls -lh image-cache/${{ env.OUTPUT_IMAGE }}.part-*
+            echo "split=true" >> $GITHUB_OUTPUT
+          else
+            echo "No split needed"
+            echo "split=false" >> $GITHUB_OUTPUT
+          fi
+
       # ── Upload as GitHub Release artifact ───────────────────────────────
       - name: Create release tag
         id: tag
@@ -556,9 +577,13 @@ jobs:
             ```
             sha256sum -c ${{ env.OUTPUT_IMAGE }}.sha256
             ```
+
+            If the image was split (`.part-aa`, `.part-ab` …), reassemble first:
+            ```
+            cat ${{ env.OUTPUT_IMAGE }}.part-* > ${{ env.OUTPUT_IMAGE }}
+            ```
           files: |
-            image-cache/${{ env.OUTPUT_IMAGE }}
-            image-cache/${{ env.OUTPUT_IMAGE }}.sha256
+            image-cache/${{ env.OUTPUT_IMAGE }}*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -579,6 +604,21 @@ jobs:
           echo "Cache hit — skipping build"
           ls -lh image-cache/
 
+      - name: Split large image for release upload
+        run: |
+          SIZE=$(stat -c%s image-cache/${{ env.OUTPUT_IMAGE }})
+          echo "Image size: $(( SIZE / 1024 / 1024 )) MB"
+          if [ "$SIZE" -gt 1990000000 ]; then
+            echo "Splitting into 1.9 GB parts for GitHub release upload..."
+            split -b 1900M \
+              "image-cache/${{ env.OUTPUT_IMAGE }}" \
+              "image-cache/${{ env.OUTPUT_IMAGE }}.part-"
+            rm "image-cache/${{ env.OUTPUT_IMAGE }}"
+            ls -lh image-cache/${{ env.OUTPUT_IMAGE }}.part-*
+          else
+            echo "No split needed"
+          fi
+
       - name: Create release tag
         id: tag
         run: echo "tag=base-$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
@@ -598,9 +638,13 @@ jobs:
             ```
             sha256sum -c ${{ env.OUTPUT_IMAGE }}.sha256
             ```
+
+            If the image was split (`.part-aa`, `.part-ab` …), reassemble first:
+            ```
+            cat ${{ env.OUTPUT_IMAGE }}.part-* > ${{ env.OUTPUT_IMAGE }}
+            ```
           files: |
-            image-cache/${{ env.OUTPUT_IMAGE }}
-            image-cache/${{ env.OUTPUT_IMAGE }}.sha256
+            image-cache/${{ env.OUTPUT_IMAGE }}*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
