@@ -173,7 +173,7 @@ install_apt() {
     qemu-system-x86 qemu-utils qemu-kvm \
     android-tools-adb \
     simg2img img2simg \
-    e2fsck python3 python3-pip \
+    e2fsprogs python3 python3-pip \
     jq curl rsync git \
     ovmf p7zip-full ca-certificates
   pip3 install jsonschema --quiet --break-system-packages 2>/dev/null \

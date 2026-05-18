@@ -140,7 +140,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 qemu-utils \
             android-tools-adb simg2img img2simg \
-            e2fsck python3 python3-pip jq curl rsync \
+            e2fsprogs python3 python3-pip jq curl rsync \
             ovmf p7zip-full
           pip3 install jsonschema --quiet
 
