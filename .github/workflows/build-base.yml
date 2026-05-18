@@ -403,10 +403,14 @@ jobs:
             gapps/gapps.zip \
             "${{ env.SYSTEM_MNT }}" \
             mnt/product
-          echo "=== Post-injection priv-app ==="
-          sudo ls -la "${{ env.SYSTEM_MNT }}/priv-app/" || true
-          sudo test -d "${{ env.SYSTEM_MNT }}/priv-app/GmsCore" \
-            || { echo "::error::GmsCore not found after injection at ${{ env.SYSTEM_MNT }}/priv-app/"; exit 1; }
+          echo "=== Post-injection GmsCore check ==="
+          # Bliss OS FOSS pre-installs GPlay as com.google.android.gms;
+          # OpenGApps installs PrebuiltGmsCore. Accept either.
+          sudo test -d "${{ env.SYSTEM_MNT }}/priv-app/com.google.android.gms" \
+            || sudo test -d "${{ env.SYSTEM_MNT }}/priv-app/PrebuiltGmsCore" \
+            || sudo test -d "${{ env.SYSTEM_MNT }}/priv-app/GmsCore" \
+            || { echo "::error::No GmsCore package found in ${{ env.SYSTEM_MNT }}/priv-app/"; exit 1; }
+          echo "GmsCore confirmed."
 
       - name: Inject ARM translation
         run: |
@@ -755,7 +759,19 @@ jobs:
           }
 
           echo "=== GApps presence ==="
-          check_file "${SYS}/priv-app/GmsCore"
+          # Accept any of the known GmsCore directory names:
+          #   com.google.android.gms  — Bliss OS FOSS pre-installs GPlay under this name
+          #   PrebuiltGmsCore         — OpenGApps injection canonical APK name
+          #   GmsCore                 — MindTheGapps / older OpenGApps
+          gmscore_found=false
+          for gms_dir in com.google.android.gms PrebuiltGmsCore GmsCore; do
+            if sudo test -d "${SYS}/priv-app/${gms_dir}"; then
+              echo "  ✓ GmsCore found at priv-app/${gms_dir}"
+              gmscore_found=true
+              break
+            fi
+          done
+          $gmscore_found || { echo "  ✗ MISSING: GmsCore (checked com.google.android.gms, PrebuiltGmsCore, GmsCore)"; FAIL=$((FAIL+1)); }
           check_file "${SYS}/etc/permissions/privapp-permissions-google.xml"
 
           echo "=== ARM translation presence ==="

@@ -5,17 +5,19 @@
 # Usage: inject-gapps.sh <gapps.zip> <system-mnt> <product-mnt>
 #
 # OpenGApps tar.lz structure:
-#   - Config packages (defaultetc, defaultframework): extract dirs like
-#     etc/, framework/ relative to the system root → rsync directly
-#   - APK packages (gmscore, vending, ...): extract as <PkgName>/<dpi>/<Pkg>.apk
-#     → install to priv-app/<PkgName>/
+#   Each .tar.lz extracts to a wrapper directory named after the archive.
+#   Two sub-cases inside the wrapper:
+#     - Config packages: wrapper contains subdirs that match system tree names
+#       (etc/, framework/) → rsync those directly into SYSTEM_MNT
+#     - APK packages: wrapper contains <dpi>/<Pkg>.apk
+#       → install to priv-app/<APKBaseName>/
 set -euo pipefail
 
 GAPPS_ZIP="$1"
 SYSTEM_MNT="$2"
 PRODUCT_MNT="$3"
 
-# Top-level dir names that map directly onto the system root (not APK packages)
+# Directory names that map directly onto the system root (not APK packages)
 SYSTEM_TREE_DIRS="etc framework lib lib64 bin overlay app priv-app"
 
 if [ ! -f "$GAPPS_ZIP" ]; then
@@ -52,7 +54,6 @@ if [ -d "${tmpdir}/Core" ]; then
 
   if [ "$archive_count" -eq 0 ]; then
     echo "[inject-gapps] ERROR: No .tar.lz archives found in Core/" >&2
-    echo "[inject-gapps] Core directory:" >&2
     ls "${tmpdir}/Core/" >&2
     exit 1
   fi
@@ -65,36 +66,53 @@ if [ -d "${tmpdir}/Core" ]; then
     [ -d "$entry" ] || continue
     name=$(basename "$entry")
 
-    # Does this look like a system-tree directory?
-    is_tree_dir=false
+    # Case 1: top-level wrapper name directly matches a system tree dir
+    is_top_tree=false
     for d in $SYSTEM_TREE_DIRS; do
-      [ "$name" = "$d" ] && { is_tree_dir=true; break; }
+      [ "$name" = "$d" ] && { is_top_tree=true; break; }
     done
 
-    if $is_tree_dir; then
+    if $is_top_tree; then
       rsync -a "${entry}" "${SYSTEM_MNT}/${name}/"
       echo "[inject-gapps] Installed system tree: ${name}/"
-    else
-      # APK package directory: <PkgName>/<dpi>/<PkgName>.apk
-      apk=$(find "$entry" -name "*.apk" | head -1)
-      if [ -z "$apk" ]; then
-        echo "[inject-gapps] WARN: No APK found in ${name}/, skipping"
-        continue
-      fi
-      dest="${SYSTEM_MNT}/priv-app/${name}"
-      mkdir -p "$dest"
-      cp "$apk" "${dest}/${name}.apk"
-      # Copy native libs if present
-      lib_dir=$(find "$entry" -maxdepth 2 -name "lib" -type d | head -1)
-      [ -n "$lib_dir" ] && rsync -a "${lib_dir}/" "${dest}/lib/" || true
-      apk_count=$((apk_count + 1))
-      echo "[inject-gapps] Installed priv-app/${name} (from $(basename "$apk"))"
+      continue
     fi
+
+    # Case 2: wrapper contains system tree subdirs one level deeper
+    # (e.g. defaultetc-common/etc/, defaultframework-common/framework/)
+    found_tree_subdir=false
+    for subentry in "${entry}"/*/; do
+      [ -d "$subentry" ] || continue
+      subname=$(basename "$subentry")
+      for d in $SYSTEM_TREE_DIRS; do
+        if [ "$subname" = "$d" ]; then
+          rsync -a "${subentry}" "${SYSTEM_MNT}/${subname}/"
+          echo "[inject-gapps] Installed system tree (via ${name}/): ${subname}/"
+          found_tree_subdir=true
+        fi
+      done
+    done
+    $found_tree_subdir && continue
+
+    # Case 3: APK package — find the .apk and use its basename as the priv-app dir name
+    apk=$(find "$entry" -name "*.apk" | head -1)
+    if [ -z "$apk" ]; then
+      echo "[inject-gapps] WARN: No APK or tree content found in ${name}/, skipping"
+      continue
+    fi
+    apk_base=$(basename "$apk" .apk)
+    dest="${SYSTEM_MNT}/priv-app/${apk_base}"
+    mkdir -p "$dest"
+    cp "$apk" "${dest}/${apk_base}.apk"
+    # Copy native libs if present
+    lib_dir=$(find "$entry" -maxdepth 2 -name "lib" -type d | head -1)
+    [ -n "$lib_dir" ] && rsync -a "${lib_dir}/" "${dest}/lib/" || true
+    apk_count=$((apk_count + 1))
+    echo "[inject-gapps] Installed priv-app/${apk_base} (from ${name}/)"
   done
 
   if [ "$apk_count" -eq 0 ]; then
     echo "[inject-gapps] ERROR: No APK packages were installed" >&2
-    echo "[inject-gapps] Extracted directory contents:" >&2
     find "$extract_dir" -maxdepth 3 >&2
     exit 1
   fi
