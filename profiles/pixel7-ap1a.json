@@ -1,0 +1,32 @@
+{
+  "meta": {
+    "id": "pixel7-ap1a",
+    "description": "Pixel 7, Android 13 AP1A.240405.002",
+    "created": "2024-04-05"
+  },
+  "system": {
+    "ro.product.manufacturer": "Google",
+    "ro.product.model": "Pixel 7",
+    "ro.product.name": "panther",
+    "ro.product.device": "panther",
+    "ro.product.brand": "google",
+    "ro.build.fingerprint": "google/panther/panther:13/AP1A.240405.002/11480754:user/release-keys",
+    "ro.build.description": "panther-user 13 AP1A.240405.002 11480754 release-keys",
+    "ro.build.tags": "release-keys",
+    "ro.build.type": "user",
+    "ro.system.build.fingerprint": "google/panther/panther:13/AP1A.240405.002/11480754:user/release-keys",
+    "ro.product.system.manufacturer": "Google",
+    "ro.product.system.model": "Pixel 7",
+    "ro.product.system.name": "panther",
+    "ro.product.system.device": "panther",
+    "ro.product.system.brand": "google"
+  },
+  "vendor": {
+    "ro.product.vendor.manufacturer": "Google",
+    "ro.product.vendor.model": "Pixel 7",
+    "ro.product.vendor.name": "panther",
+    "ro.product.vendor.device": "panther",
+    "ro.product.vendor.brand": "google",
+    "ro.vendor.build.fingerprint": "google/panther/panther:13/AP1A.240405.002/11480754:user/release-keys"
+  }
+}

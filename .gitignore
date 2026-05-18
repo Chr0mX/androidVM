@@ -1,0 +1,33 @@
+# Large binary artifacts — never commit these
+*.qcow2
+*.vmdk
+*.img
+*.iso
+*.raw
+*.tar.gz
+*.zip
+
+# Checksums are OK to commit, but build outputs are not
+/checksums.sha256
+
+# Mounted partition directories (populated at runtime)
+mnt/
+
+# Downloaded source assets
+source-image/
+work/
+image-cache/
+
+# Runtime state
+/tmp/
+*.pid
+*.log
+logs/*.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# But keep the directory placeholders
+!**/.gitkeep

@@ -1,0 +1,32 @@
+{
+  "meta": {
+    "id": "samsung-s23-eu",
+    "description": "Samsung Galaxy S23, Android 13 TP1A.220624.014 EU variant",
+    "created": "2024-01-15"
+  },
+  "system": {
+    "ro.product.manufacturer": "samsung",
+    "ro.product.model": "SM-S911B",
+    "ro.product.name": "dm1qxxx",
+    "ro.product.device": "dm1q",
+    "ro.product.brand": "samsung",
+    "ro.build.fingerprint": "samsung/dm1qxxx/dm1q:13/TP1A.220624.014/S911BXXS3AWF5:user/release-keys",
+    "ro.build.description": "dm1qxxx-user 13 TP1A.220624.014 S911BXXS3AWF5 release-keys",
+    "ro.build.tags": "release-keys",
+    "ro.build.type": "user",
+    "ro.system.build.fingerprint": "samsung/dm1qxxx/dm1q:13/TP1A.220624.014/S911BXXS3AWF5:user/release-keys",
+    "ro.product.system.manufacturer": "samsung",
+    "ro.product.system.model": "SM-S911B",
+    "ro.product.system.name": "dm1qxxx",
+    "ro.product.system.device": "dm1q",
+    "ro.product.system.brand": "samsung"
+  },
+  "vendor": {
+    "ro.product.vendor.manufacturer": "samsung",
+    "ro.product.vendor.model": "SM-S911B",
+    "ro.product.vendor.name": "dm1qxxx",
+    "ro.product.vendor.device": "dm1q",
+    "ro.product.vendor.brand": "samsung",
+    "ro.vendor.build.fingerprint": "samsung/dm1qxxx/dm1q:13/TP1A.220624.014/S911BXXS3AWF5:user/release-keys"
+  }
+}

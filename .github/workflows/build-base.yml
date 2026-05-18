@@ -1,0 +1,368 @@
+name: Build Android 11 Base Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'gapps/**'
+      - 'arm-trans/**'
+      - 'scripts/lib/inject-gapps.sh'
+      - 'scripts/lib/inject-arm-trans.sh'
+      - 'scripts/build-intermediate.sh'
+      - '.github/workflows/build-base.yml'
+  schedule:
+    # Rebuild monthly to pick up updated GApps packages
+    - cron: '0 2 1 * *'
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 'Force full rebuild even if cache is valid'
+        type: boolean
+        default: false
+      gapps_url:
+        description: 'Override GApps download URL (leave blank for default)'
+        type: string
+        default: ''
+
+# Only one build runs at a time — later runs cancel earlier queued ones
+concurrency:
+  group: build-base
+  cancel-in-progress: true
+
+env:
+  # Pinned source image — update ANDROID_IMG_SHA256 when moving to a new base
+  ANDROID_IMG_URL: "https://sourceforge.net/projects/android-x86/files/Release%209.0/android-x86_64-9.0-r2.iso"
+  ANDROID_IMG_SHA256: ""   # set this once you pin a specific release
+  GAPPS_URL_DEFAULT: "https://github.com/nicholasbuse/mindthegapps/releases/download/20231114/MindTheGapps-11.0.0-x86_64-20231114_112039.zip"
+  GAPPS_SHA256: "REPLACE_WITH_REAL_SHA256"
+  ARM_TRANS_TAG: "0.2.2"
+  OUTPUT_IMAGE: "android11-gapps-arm.qcow2"
+
+jobs:
+  # ─── Job 1: validate inputs, compute cache key ───────────────────────────
+  preflight:
+    name: Preflight checks
+    runs-on: ubuntu-22.04
+    outputs:
+      cache_key: ${{ steps.key.outputs.cache_key }}
+      gapps_url: ${{ steps.urls.outputs.gapps_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve GApps URL
+        id: urls
+        run: |
+          if [ -n "${{ inputs.gapps_url }}" ]; then
+            echo "gapps_url=${{ inputs.gapps_url }}" >> $GITHUB_OUTPUT
+          else
+            echo "gapps_url=${{ env.GAPPS_URL_DEFAULT }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Compute cache key
+        id: key
+        run: |
+          # Cache key is a hash of every input that affects the output image.
+          # A cache hit means we can skip the multi-hour build and reuse the
+          # previously uploaded artifact.
+          hash=$(echo -n \
+            "${{ env.ANDROID_IMG_SHA256 }}" \
+            "${{ steps.urls.outputs.gapps_url }}" \
+            "${{ env.ARM_TRANS_TAG }}" \
+            "$(sha256sum scripts/lib/inject-gapps.sh scripts/lib/inject-arm-trans.sh \
+               | awk '{print $1}' | tr -d '\n')" \
+            | sha256sum | awk '{print $1}' | cut -c1-16)
+          echo "cache_key=base-image-${hash}" >> $GITHUB_OUTPUT
+
+      - name: Validate all profile schemas
+        run: |
+          pip install jsonschema --quiet
+          for f in profiles/*.json; do
+            echo "Validating $f"
+            python3 scripts/lib/profile-validator.py "$f"
+          done
+
+  # ─── Job 2: check if a valid cached image already exists ─────────────────
+  check-cache:
+    name: Check image cache
+    needs: preflight
+    runs-on: ubuntu-22.04
+    outputs:
+      cache_hit: ${{ steps.cache.outputs.cache-hit }}
+    steps:
+      - name: Check cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: image-cache/
+          key: ${{ needs.preflight.outputs.cache_key }}
+          lookup-only: true
+
+  # ─── Job 3: build the intermediate image (runs on self-hosted for KVM) ───
+  build:
+    name: Build intermediate image
+    needs: [preflight, check-cache]
+    # Skip if cache is valid and not forcing a rebuild
+    if: needs.check-cache.outputs.cache_hit != 'true' || inputs.force_rebuild == true
+    # GitHub-hosted ubuntu-22.04 runners do NOT have /dev/kvm.
+    # Register a self-hosted runner tagged 'kvm' for real builds.
+    # To register: Settings → Actions → Runners → New self-hosted runner
+    #              Label it: self-hosted, linux, kvm
+    runs-on: [self-hosted, linux, kvm]
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils qemu-kvm \
+            android-tools-adb simg2img img2simg \
+            e2fsck python3 python3-pip jq curl rsync \
+            ovmf p7zip-full
+          pip3 install jsonschema --quiet
+
+      - name: Verify KVM is accessible
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "::warning::/dev/kvm not available — build will use TCG (slow)"
+          else
+            echo "KVM available: $(ls -la /dev/kvm)"
+          fi
+
+      # ── Download & verify Android x86_64 source image ──────────────────
+      - name: Cache source image download
+        uses: actions/cache@v4
+        id: source-cache
+        with:
+          path: source-image/
+          key: android-source-${{ env.ANDROID_IMG_SHA256 }}
+
+      - name: Download Android x86_64 image
+        if: steps.source-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p source-image
+          curl -L --retry 5 --retry-delay 10 \
+            "${{ env.ANDROID_IMG_URL }}" \
+            -o source-image/android11.img
+          if [ -n "${{ env.ANDROID_IMG_SHA256 }}" ]; then
+            echo "${{ env.ANDROID_IMG_SHA256 }}  source-image/android11.img" | sha256sum -c
+          else
+            echo "::warning::No SHA256 pinned for source image — skipping checksum"
+          fi
+
+      # ── Download & verify GApps ─────────────────────────────────────────
+      - name: Cache GApps download
+        uses: actions/cache@v4
+        id: gapps-cache
+        with:
+          path: gapps/
+          key: gapps-${{ needs.preflight.outputs.gapps_url }}
+
+      - name: Download GApps
+        if: steps.gapps-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p gapps
+          curl -L --retry 5 --retry-delay 10 \
+            "${{ needs.preflight.outputs.gapps_url }}" \
+            -o gapps/mindthegapps.zip
+          if [ -n "${{ env.GAPPS_SHA256 }}" ] && \
+             [ "${{ env.GAPPS_SHA256 }}" != "REPLACE_WITH_REAL_SHA256" ]; then
+            echo "${{ env.GAPPS_SHA256 }}  gapps/mindthegapps.zip" | sha256sum -c
+          fi
+
+      # ── Download ARM translation libs ───────────────────────────────────
+      - name: Cache ARM translation
+        uses: actions/cache@v4
+        id: armtrans-cache
+        with:
+          path: arm-trans/
+          key: arm-trans-${{ env.ARM_TRANS_TAG }}
+
+      - name: Download ARM translation
+        if: steps.armtrans-cache.outputs.cache-hit != 'true'
+        run: |
+          bash scripts/lib/fetch-arm-trans.sh "${{ env.ARM_TRANS_TAG }}" arm-trans/
+
+      # ── Prepare working image ───────────────────────────────────────────
+      - name: Convert source to qcow2
+        run: |
+          mkdir -p work
+          qemu-img convert -f raw -O qcow2 \
+            source-image/android11.img work/android11-base.qcow2
+          qemu-img info work/android11-base.qcow2
+
+      - name: Create intermediate layer
+        run: |
+          qemu-img create -f qcow2 \
+            -b work/android11-base.qcow2 \
+            -F qcow2 \
+            work/${{ env.OUTPUT_IMAGE }}
+
+      # ── Mount and patch ─────────────────────────────────────────────────
+      - name: Load nbd module
+        run: |
+          sudo modprobe nbd max_part=8
+          sleep 1
+
+      - name: Mount intermediate image via NBD
+        run: |
+          sudo qemu-nbd --connect=/dev/nbd0 work/${{ env.OUTPUT_IMAGE }}
+          sleep 2
+          lsblk /dev/nbd0
+          sudo mkdir -p mnt/{system,vendor,product}
+
+      - name: Detect and mount partitions
+        run: |
+          PARTS=$(lsblk -o NAME,FSTYPE /dev/nbd0 --json | python3 -c "
+          import json,sys
+          data=json.load(sys.stdin)
+          for child in data['blockdevices'][0].get('children',[]):
+              print(child['name'], child.get('fstype',''))
+          ")
+          echo "Partition map:"
+          echo "$PARTS"
+          sudo mount /dev/nbd0p2 mnt/system
+          sudo mount /dev/nbd0p5 mnt/vendor
+          sudo mount /dev/nbd0p6 mnt/product || echo "No product partition — skipping"
+
+      - name: Inject GApps
+        run: |
+          sudo bash scripts/lib/inject-gapps.sh \
+            gapps/mindthegapps.zip \
+            mnt/system \
+            mnt/product
+
+      - name: Inject ARM translation
+        run: |
+          sudo bash scripts/lib/inject-arm-trans.sh \
+            arm-trans/ \
+            mnt/vendor
+
+      - name: Restore SELinux file contexts
+        run: |
+          sudo chroot mnt/system /sbin/restorecon -R /priv-app/ 2>/dev/null || true
+          sudo chroot mnt/vendor /sbin/restorecon -R /lib/ndk_translation/ 2>/dev/null || true
+
+      - name: Unmount and disconnect
+        if: always()
+        run: |
+          sudo umount mnt/system mnt/vendor mnt/product 2>/dev/null || true
+          sudo qemu-nbd --disconnect /dev/nbd0 2>/dev/null || true
+          sudo rmdir mnt/system mnt/vendor mnt/product 2>/dev/null || true
+
+      # ── Flatten and checksum ────────────────────────────────────────────
+      - name: Flatten backing chain into portable single image
+        run: |
+          mkdir -p image-cache
+          qemu-img convert -O qcow2 -c \
+            work/${{ env.OUTPUT_IMAGE }} \
+            image-cache/${{ env.OUTPUT_IMAGE }}
+          qemu-img info image-cache/${{ env.OUTPUT_IMAGE }}
+
+      - name: Record checksums
+        run: |
+          cd image-cache
+          sha256sum ${{ env.OUTPUT_IMAGE }} > ${{ env.OUTPUT_IMAGE }}.sha256
+          cat ${{ env.OUTPUT_IMAGE }}.sha256
+
+      # ── Cache for future runs ───────────────────────────────────────────
+      - name: Save image to cache
+        uses: actions/cache/save@v4
+        with:
+          path: image-cache/
+          key: ${{ needs.preflight.outputs.cache_key }}
+
+      # ── Upload as GitHub Release artifact ───────────────────────────────
+      - name: Create release tag
+        id: tag
+        run: echo "tag=base-$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "Base image ${{ steps.tag.outputs.tag }}"
+          body: |
+            Intermediate base image with GApps + ARM translation pre-baked.
+
+            - ARM translation: libndk_translation ${{ env.ARM_TRANS_TAG }}
+            - GApps: MindTheGapps 11.0.0 x86_64
+
+            Verify before use:
+            ```
+            sha256sum -c ${{ env.OUTPUT_IMAGE }}.sha256
+            ```
+          files: |
+            image-cache/${{ env.OUTPUT_IMAGE }}
+            image-cache/${{ env.OUTPUT_IMAGE }}.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ─── Job 4: restore cache hit (no build needed) ───────────────────────
+  restore-from-cache:
+    name: Restore cached image
+    needs: [preflight, check-cache]
+    if: needs.check-cache.outputs.cache_hit == 'true' && inputs.force_rebuild != true
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Restore from cache
+        uses: actions/cache/restore@v4
+        with:
+          path: image-cache/
+          key: ${{ needs.preflight.outputs.cache_key }}
+      - name: Confirm
+        run: |
+          echo "Cache hit — skipping build"
+          ls -lh image-cache/
+
+  # ─── Job 5: smoke test — boot the image headlessly and check ADB ──────
+  smoke-test:
+    name: Smoke test
+    needs: [build]
+    if: needs.build.result == 'success'
+    runs-on: [self-hosted, linux, kvm]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download built image from release
+        run: |
+          gh release download --pattern "${{ env.OUTPUT_IMAGE }}" \
+            --dir image-cache/ latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create throw-away userdata volume
+        run: qemu-img create -f qcow2 userdata-test.qcow2 4G
+
+      - name: Boot VM headlessly (30s timeout for ADB)
+        run: |
+          qemu-system-x86_64 \
+            -enable-kvm \
+            -smp 2 -m 2048 \
+            -cpu host \
+            -machine q35 \
+            -drive file=image-cache/${{ env.OUTPUT_IMAGE }},if=virtio,index=0 \
+            -drive file=userdata-test.qcow2,if=virtio,index=1 \
+            -device virtio-net-pci,netdev=net0 \
+            -netdev user,id=net0,hostfwd=tcp::5555-:5555 \
+            -display none \
+            -daemonize \
+            -pidfile /tmp/qemu.pid
+          echo "VM started, waiting for ADB..."
+          sleep 30
+
+      - name: ADB smoke checks
+        run: |
+          adb connect localhost:5555
+          adb wait-for-device shell echo "ADB OK"
+          adb shell getprop ro.dalvik.vm.native.bridge
+          ! adb shell getprop | grep -qi "generic_x86\|test-keys\|emulator"
+
+      - name: Kill VM
+        if: always()
+        run: |
+          kill $(cat /tmp/qemu.pid) 2>/dev/null || true
+          rm -f userdata-test.qcow2

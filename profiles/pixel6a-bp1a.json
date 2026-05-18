@@ -1,0 +1,32 @@
+{
+  "meta": {
+    "id": "pixel6a-bp1a",
+    "description": "Pixel 6a, Android 13 BP1A.240905.003",
+    "created": "2024-09-05"
+  },
+  "system": {
+    "ro.product.manufacturer": "Google",
+    "ro.product.model": "Pixel 6a",
+    "ro.product.name": "bluejay",
+    "ro.product.device": "bluejay",
+    "ro.product.brand": "google",
+    "ro.build.fingerprint": "google/bluejay/bluejay:13/BP1A.240905.003/12231197:user/release-keys",
+    "ro.build.description": "bluejay-user 13 BP1A.240905.003 12231197 release-keys",
+    "ro.build.tags": "release-keys",
+    "ro.build.type": "user",
+    "ro.system.build.fingerprint": "google/bluejay/bluejay:13/BP1A.240905.003/12231197:user/release-keys",
+    "ro.product.system.manufacturer": "Google",
+    "ro.product.system.model": "Pixel 6a",
+    "ro.product.system.name": "bluejay",
+    "ro.product.system.device": "bluejay",
+    "ro.product.system.brand": "google"
+  },
+  "vendor": {
+    "ro.product.vendor.manufacturer": "Google",
+    "ro.product.vendor.model": "Pixel 6a",
+    "ro.product.vendor.name": "bluejay",
+    "ro.product.vendor.device": "bluejay",
+    "ro.product.vendor.brand": "google",
+    "ro.vendor.build.fingerprint": "google/bluejay/bluejay:13/BP1A.240905.003/12231197:user/release-keys"
+  }
+}
