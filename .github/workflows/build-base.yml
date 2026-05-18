@@ -37,6 +37,9 @@ concurrency:
   group: build-base
   cancel-in-progress: true
 
+permissions:
+  contents: write   # required to create GitHub releases and upload assets
+
 env:
   BLISSOS_SF_PATH: "Official/BlissOS14/FOSS/Generic"
   SOURCE_IMG_SHA256: ""   # set to a sha256 hex string to pin and verify a specific release
