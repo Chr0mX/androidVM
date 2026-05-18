@@ -418,7 +418,7 @@ jobs:
             fi
           done
           echo "=== ARM bridge props ==="
-          grep "ro\.dalvik\|ro\.enable\.native\|ro\.vendor\.enable\|ro\.ndk_translation\|abilist" "$VPROP"
+          sudo grep "ro\.dalvik\|ro\.enable\.native\|ro\.vendor\.enable\|ro\.ndk_translation\|abilist" "$VPROP"
 
       - name: Restore SELinux file contexts
         run: |
@@ -497,16 +497,15 @@ jobs:
           # GRUB config — Android x86 standard kernel cmdline
           sudo mkdir -p mnt/android/boot/grub
           sudo tee mnt/android/boot/grub/grub.cfg > /dev/null << 'GRUBCFG'
-          set default=0
-          set timeout=3
+set default=0
+set timeout=3
 
-          menuentry "Android-x86" {
-            search --set=root --label Android
-            linux  /kernel root=/dev/ram0 androidboot.hardware=android_x86_64 \
-                   androidboot.selinux=enforcing DATA=
-            initrd /ramdisk.img
-          }
-          GRUBCFG
+menuentry "Bliss OS 14" {
+  search --set=root --label Android
+  linux /kernel root=/dev/ram0 androidboot.hardware=android_x86_64 androidboot.selinux=permissive SRC= DATA=
+  initrd /initrd.img
+}
+GRUBCFG
 
           sudo umount mnt/efi mnt/android
           sudo rmdir  mnt/efi mnt/android
