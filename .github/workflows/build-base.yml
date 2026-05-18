@@ -360,17 +360,21 @@ jobs:
 
       - name: Detect system image layout
         run: |
-          # Bliss OS system.img is the Android *rootfs* (not just /system partition).
-          # Real system files live at /system/ inside the rootfs, so on the host
-          # they are at mnt/system/system/. Top-level entries like /etc, /vendor,
-          # /lib are compatibility symlinks (e.g. /vendor -> /system/vendor) that
-          # dangle outside a running Android environment.
-          if [ -d "mnt/system/system" ]; then
+          # Detect whether system.img is a bare system partition (build.prop and
+          # app/ live at the mount root) or a rootfs image (system files live one
+          # level deeper at mnt/system/system/). We use build.prop presence as the
+          # authoritative indicator because Android-x86 rootfs images contain a
+          # lightweight system/ subdirectory that would trigger a naive directory
+          # check even when the real system files are at the mount root.
+          if [ -f "mnt/system/build.prop" ] || [ -d "mnt/system/app" ] || [ -d "mnt/system/lib" ]; then
+            SYS="mnt/system"
+            echo "System-partition image detected — system files at ${SYS}/"
+          elif [ -f "mnt/system/system/build.prop" ] || [ -d "mnt/system/system/app" ]; then
             SYS="mnt/system/system"
             echo "Rootfs image detected — system files at ${SYS}/"
           else
             SYS="mnt/system"
-            echo "System-partition image detected — system files at ${SYS}/"
+            echo "Layout unknown — defaulting to system-partition layout at ${SYS}/"
           fi
 
           if [ -f work/vendor.raw ]; then
@@ -396,7 +400,7 @@ jobs:
       - name: Inject ARM translation
         run: |
           sudo bash scripts/lib/inject-arm-trans.sh \
-            arm-trans/ \
+            arm-trans/libndk_translation \
             "${{ env.VENDOR_MNT }}"
 
       - name: Write ARM bridge props
@@ -706,11 +710,15 @@ jobs:
             || { echo "::error::system.img not found on data partition"; exit 1; }
 
           # Detect rootfs vs system-partition image (same logic as build job)
-          if [ -d "mnt/system/system" ]; then
+          if [ -f "mnt/system/build.prop" ] || [ -d "mnt/system/app" ] || [ -d "mnt/system/lib" ]; then
+            SYS="mnt/system"
+            echo "System-partition image — system files at ${SYS}/"
+          elif [ -f "mnt/system/system/build.prop" ] || [ -d "mnt/system/system/app" ]; then
             SYS="mnt/system/system"
             echo "Rootfs image — system files at ${SYS}/"
           else
             SYS="mnt/system"
+            echo "Layout unknown — defaulting to ${SYS}/"
           fi
 
           # vendor: separate image or directory inside system
@@ -745,7 +753,7 @@ jobs:
 
           echo "=== ARM bridge props ==="
           VPROP="${VENDOR_CHECK}/build.prop"
-          if [ -f "$VPROP" ] && grep -q "ro.dalvik.vm.native.bridge=libndk_translation.so" "$VPROP"; then
+          if [ -f "$VPROP" ] && sudo grep -q "ro.dalvik.vm.native.bridge=libndk_translation.so" "$VPROP"; then
             echo "  ✓ ro.dalvik.vm.native.bridge present"
           else
             echo "  ✗ ro.dalvik.vm.native.bridge missing from ${VPROP}"
