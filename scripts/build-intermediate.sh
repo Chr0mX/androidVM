@@ -17,8 +17,6 @@ SOURCE_IMG="${ROOT}/base/android11-base.qcow2"
 GAPPS_ZIP="${ROOT}/gapps/mindthegapps.zip"
 ARM_TRANS_DIR="${ROOT}/arm-trans/libndk_translation"
 OUT_IMG="${ROOT}/intermediate/android11-gapps-arm.qcow2"
-ARM_TRANS_VERSION="0.2.2"
-
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --source) SOURCE_IMG="$2"; shift 2 ;;
@@ -34,9 +32,9 @@ die()  { echo "[build-intermediate] ERROR: $*" >&2; exit 1; }
 [ -f "$SOURCE_IMG" ] || die "Source image not found: $SOURCE_IMG"
 [ -f "$GAPPS_ZIP"  ] || die "GApps zip not found: $GAPPS_ZIP"
 
-if [ ! -d "$ARM_TRANS_DIR" ]; then
-  log "ARM translation libs not found — fetching version ${ARM_TRANS_VERSION} ..."
-  bash "${SCRIPT_DIR}/lib/fetch-arm-trans.sh" "$ARM_TRANS_VERSION" "${ROOT}/arm-trans"
+if [ ! -f "${ARM_TRANS_DIR}/lib64/libndk_translation.so" ]; then
+  log "ARM translation libs not found — fetching ..."
+  bash "${SCRIPT_DIR}/lib/fetch-arm-trans.sh" "${ROOT}/arm-trans"
 fi
 
 [ -f "${ARM_TRANS_DIR}/lib64/libndk_translation.so" ] \
@@ -82,12 +80,14 @@ VENDOR_PROP="$MNT_VENDOR/build.prop"
 if [ -f "$VENDOR_PROP" ]; then
   # Only add if not already present
   for kv in \
-    "ro.dalvik.vm.native.bridge=libndk_translation.so" \
-    "ro.enable.native.bridge.exec=1" \
-    "ro.ndk_translation.version=${ARM_TRANS_VERSION}" \
     "ro.product.cpu.abilist=x86_64,x86,arm64-v8a,armeabi-v7a,armeabi" \
     "ro.product.cpu.abilist32=x86,armeabi-v7a,armeabi" \
-    "ro.product.cpu.abilist64=x86_64,arm64-v8a"
+    "ro.product.cpu.abilist64=x86_64,arm64-v8a" \
+    "ro.dalvik.vm.native.bridge=libndk_translation.so" \
+    "ro.enable.native.bridge.exec=1" \
+    "ro.vendor.enable.native.bridge.exec=1" \
+    "ro.vendor.enable.native.bridge.exec64=1" \
+    "ro.ndk_translation.version=0.2.2"
   do
     key="${kv%%=*}"
     if ! grep -q "^${key}=" "$VENDOR_PROP"; then

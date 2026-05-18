@@ -252,7 +252,7 @@ else
       || die "GApps zip missing at gapps/mindthegapps.zip — place it there first"
     if [ ! -d "arm-trans/libndk_translation" ]; then
       log "Fetching ARM translation libs..."
-      bash scripts/lib/fetch-arm-trans.sh "0.2.2" arm-trans/
+      bash scripts/lib/fetch-arm-trans.sh arm-trans/
     fi
     bash scripts/build-intermediate.sh
   else

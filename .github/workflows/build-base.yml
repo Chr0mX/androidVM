@@ -39,7 +39,7 @@ env:
   ANDROID_IMG_SHA256: ""   # set this once you pin a specific release
   GAPPS_URL_DEFAULT: "https://github.com/nicholasbuse/mindthegapps/releases/download/20231114/MindTheGapps-11.0.0-x86_64-20231114_112039.zip"
   GAPPS_SHA256: "REPLACE_WITH_REAL_SHA256"
-  ARM_TRANS_TAG: "0.2.2"
+  ARM_TRANS_COMMIT: "9324a8914b649b885dad6f2bfd14a67e5d1520bf"
   OUTPUT_IMAGE: "android11-gapps-arm.qcow2"
 
 jobs:
@@ -71,7 +71,7 @@ jobs:
           hash=$(echo -n \
             "${{ env.ANDROID_IMG_SHA256 }}" \
             "${{ steps.urls.outputs.gapps_url }}" \
-            "${{ env.ARM_TRANS_TAG }}" \
+            "${{ env.ARM_TRANS_COMMIT }}" \
             "$(sha256sum scripts/lib/inject-gapps.sh scripts/lib/inject-arm-trans.sh \
                | awk '{print $1}' | tr -d '\n')" \
             | sha256sum | awk '{print $1}' | cut -c1-16)
@@ -143,7 +143,7 @@ jobs:
             qemu-system-x86 qemu-utils \
             android-tools-adb simg2img \
             e2fsprogs python3 python3-pip jq curl rsync \
-            ovmf p7zip-full
+            ovmf p7zip-full lzip unzip
           pip3 install jsonschema --quiet
 
       # ── Download & verify Android x86_64 source image ──────────────────
@@ -193,12 +193,12 @@ jobs:
         id: armtrans-cache
         with:
           path: arm-trans/
-          key: arm-trans-${{ env.ARM_TRANS_TAG }}
+          key: arm-trans-${{ env.ARM_TRANS_COMMIT }}
 
       - name: Download ARM translation
         if: steps.armtrans-cache.outputs.cache-hit != 'true'
         run: |
-          bash scripts/lib/fetch-arm-trans.sh "${{ env.ARM_TRANS_TAG }}" arm-trans/
+          bash scripts/lib/fetch-arm-trans.sh arm-trans/
 
       # ── Prepare working image ───────────────────────────────────────────
       - name: Convert source to qcow2
@@ -308,7 +308,7 @@ jobs:
           body: |
             Intermediate base image with GApps + ARM translation pre-baked.
 
-            - ARM translation: libndk_translation ${{ env.ARM_TRANS_TAG }}
+            - ARM translation: libndk_translation (commit ${{ env.ARM_TRANS_COMMIT }})
             - GApps: MindTheGapps 11.0.0 x86_64
 
             Verify before use:
@@ -350,7 +350,7 @@ jobs:
           body: |
             Cache hit — image content unchanged from previous build.
 
-            - ARM translation: libndk_translation ${{ env.ARM_TRANS_TAG }}
+            - ARM translation: libndk_translation (commit ${{ env.ARM_TRANS_COMMIT }})
             - GApps: MindTheGapps 11.0.0 x86_64
 
             Verify before use:
