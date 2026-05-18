@@ -77,6 +77,7 @@ jobs:
         run: |
           pip install jsonschema --quiet
           for f in profiles/*.json; do
+            [ "$(basename "$f")" = "schema.json" ] && continue
             echo "Validating $f"
             python3 scripts/lib/profile-validator.py "$f"
           done
