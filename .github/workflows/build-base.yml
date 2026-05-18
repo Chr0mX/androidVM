@@ -34,13 +34,13 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Pinned source image — update ANDROID_IMG_SHA256 when moving to a new base
-  ANDROID_IMG_URL: "https://sourceforge.net/projects/android-x86/files/Release%2011.0/android-x86_64-11.0-r4.iso/download"
-  ANDROID_IMG_SHA256: ""   # set this once you pin a specific release
+  # Pinned source image — update SOURCE_IMG_SHA256 when moving to a new release
+  SOURCE_IMG_URL: "https://sourceforge.net/projects/blissos-x86/files/Official/BlissOS14/FOSS/Generic/Bliss-v14.10.3-x86_64-OFFICIAL-foss-20241012.iso/download"
+  SOURCE_IMG_SHA256: ""   # set this once you pin a specific release
   GAPPS_URL_DEFAULT: "https://github.com/nicholasbuse/mindthegapps/releases/download/20231114/MindTheGapps-11.0.0-x86_64-20231114_112039.zip"
   GAPPS_SHA256: "REPLACE_WITH_REAL_SHA256"
   ARM_TRANS_COMMIT: "9324a8914b649b885dad6f2bfd14a67e5d1520bf"
-  OUTPUT_IMAGE: "android11-gapps-arm.qcow2"
+  OUTPUT_IMAGE: "blissos14-gapps-arm.qcow2"
 
 jobs:
   # ─── Job 1: validate inputs, compute cache key ───────────────────────────
@@ -69,7 +69,7 @@ jobs:
           # A cache hit means we can skip the multi-hour build and reuse the
           # previously uploaded artifact.
           hash=$(echo -n \
-            "${{ env.ANDROID_IMG_SHA256 }}" \
+            "${{ env.SOURCE_IMG_SHA256 }}" \
             "${{ steps.urls.outputs.gapps_url }}" \
             "${{ env.ARM_TRANS_COMMIT }}" \
             "$(sha256sum scripts/lib/inject-gapps.sh scripts/lib/inject-arm-trans.sh \
@@ -153,24 +153,24 @@ jobs:
         id: source-cache
         with:
           path: source-image/
-          key: android-source-${{ env.ANDROID_IMG_SHA256 }}
+          key: source-img-${{ env.SOURCE_IMG_SHA256 }}
 
       - name: Download Android x86_64 image
         if: steps.source-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p source-image
           curl -L --retry 5 --retry-delay 10 \
-            "${{ env.ANDROID_IMG_URL }}" \
-            -o source-image/android11.img
-          if [ -n "${{ env.ANDROID_IMG_SHA256 }}" ]; then
-            echo "${{ env.ANDROID_IMG_SHA256 }}  source-image/android11.img" | sha256sum -c
+            "${{ env.SOURCE_IMG_URL }}" \
+            -o source-image/source.img
+          if [ -n "${{ env.SOURCE_IMG_SHA256 }}" ]; then
+            echo "${{ env.SOURCE_IMG_SHA256 }}  source-image/source.img" | sha256sum -c
           else
             echo "::warning::No SHA256 pinned for source image — skipping checksum"
           fi
           # Verify the download is actually an ISO, not an HTML redirect page
-          file source-image/android11.img
-          file source-image/android11.img | grep -qi "ISO 9660\|CD-ROM" \
-            || { echo "::error::Downloaded file is not an ISO — SourceForge may have served an HTML page. Check ANDROID_IMG_URL."; exit 1; }
+          file source-image/source.img
+          file source-image/source.img | grep -qi "ISO 9660\|CD-ROM" \
+            || { echo "::error::Downloaded file is not an ISO — SourceForge may have served an HTML page. Check SOURCE_IMG_URL."; exit 1; }
 
       # ── Download & verify GApps ─────────────────────────────────────────
       - name: Cache GApps download
@@ -212,7 +212,7 @@ jobs:
       - name: Extract partition images from ISO
         run: |
           mkdir -p iso-mount work
-          sudo mount -o loop,ro source-image/android11.img iso-mount
+          sudo mount -o loop,ro source-image/source.img iso-mount
 
           echo "=== ISO root contents ==="
           ls -la iso-mount/
@@ -319,15 +319,15 @@ jobs:
           DISK_SZ=$(( DATA_SZ + 256 * 1024 * 1024 + 4 * 1024 * 1024 ))
           echo "Disk size: $(( DISK_SZ / 1024 / 1024 )) MB  (data $(( DATA_SZ / 1024 / 1024 )) MB)"
 
-          truncate -s $DISK_SZ work/android11-disk.raw
+          truncate -s $DISK_SZ work/disk.raw
 
-          sudo parted -s work/android11-disk.raw \
+          sudo parted -s work/disk.raw \
             mklabel gpt \
             mkpart EFI  fat32 1MiB   257MiB \
             set 1 esp on \
             mkpart Data ext4  257MiB 100%
 
-          LOOP=$(sudo losetup --find --show --partscan work/android11-disk.raw)
+          LOOP=$(sudo losetup --find --show --partscan work/disk.raw)
           echo "Loop device: $LOOP"
           sleep 1
 
@@ -377,7 +377,7 @@ jobs:
         run: |
           mkdir -p image-cache
           qemu-img convert -O qcow2 -c \
-            work/android11-disk.raw \
+            work/disk.raw \
             image-cache/${{ env.OUTPUT_IMAGE }}
           qemu-img info image-cache/${{ env.OUTPUT_IMAGE }}
 
