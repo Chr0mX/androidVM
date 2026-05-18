@@ -40,8 +40,9 @@ concurrency:
 env:
   BLISSOS_SF_PATH: "Official/BlissOS14/FOSS/Generic"
   SOURCE_IMG_SHA256: ""   # set to a sha256 hex string to pin and verify a specific release
-  GAPPS_URL_DEFAULT: "https://github.com/nicholasbuse/mindthegapps/releases/download/20231114/MindTheGapps-11.0.0-x86_64-20231114_112039.zip"
-  GAPPS_SHA256: "REPLACE_WITH_REAL_SHA256"
+  # OpenGApps pico x86_64 for Android 11 — last build before the project froze
+  GAPPS_URL_DEFAULT: "https://sourceforge.net/projects/opengapps/files/x86_64/20220503/open_gapps-x86_64-11.0-pico-20220503.zip/download"
+  GAPPS_SHA256: ""
   ARM_TRANS_COMMIT: "9324a8914b649b885dad6f2bfd14a67e5d1520bf"
   OUTPUT_IMAGE: "blissos14-gapps-arm.qcow2"
 
@@ -237,11 +238,13 @@ jobs:
           mkdir -p gapps
           curl -L --retry 5 --retry-delay 10 \
             "${{ needs.preflight.outputs.gapps_url }}" \
-            -o gapps/mindthegapps.zip
-          if [ -n "${{ env.GAPPS_SHA256 }}" ] && \
-             [ "${{ env.GAPPS_SHA256 }}" != "REPLACE_WITH_REAL_SHA256" ]; then
-            echo "${{ env.GAPPS_SHA256 }}  gapps/mindthegapps.zip" | sha256sum -c
+            -o gapps/gapps.zip
+          if [ -n "${{ env.GAPPS_SHA256 }}" ]; then
+            echo "${{ env.GAPPS_SHA256 }}  gapps/gapps.zip" | sha256sum -c
           fi
+          file gapps/gapps.zip
+          file gapps/gapps.zip | grep -qi "Zip archive\|zip\|Java archive" \
+            || { echo "::error::Downloaded GApps file is not a zip — URL may have returned an HTML page"; exit 1; }
 
       # ── Download ARM translation libs ───────────────────────────────────
       - name: Cache ARM translation
@@ -347,17 +350,25 @@ jobs:
       # ── Loop-mount raw images and inject ───────────────────────────────────
       - name: Mount partition images
         run: |
-          sudo mkdir -p mnt/{system,vendor,product}
+          sudo mkdir -p mnt/system mnt/product
           sudo mount -o loop,rw work/system.raw mnt/system
-          [ -f work/vendor.raw ]  && sudo mount -o loop,rw work/vendor.raw  mnt/vendor  \
-            || echo "No vendor partition — vendor injection skipped"
           [ -f work/product.raw ] && sudo mount -o loop,rw work/product.raw mnt/product \
             || echo "No product partition — product injection skipped"
+          # Bliss OS has no separate vendor.img; vendor lives at system/vendor/
+          if [ -f work/vendor.raw ]; then
+            sudo mkdir -p mnt/vendor
+            sudo mount -o loop,rw work/vendor.raw mnt/vendor
+            echo "VENDOR_MNT=mnt/vendor" >> "$GITHUB_ENV"
+          else
+            sudo mkdir -p mnt/system/vendor
+            echo "VENDOR_MNT=mnt/system/vendor" >> "$GITHUB_ENV"
+            echo "No separate vendor.img — using mnt/system/vendor"
+          fi
 
       - name: Inject GApps
         run: |
           sudo bash scripts/lib/inject-gapps.sh \
-            gapps/mindthegapps.zip \
+            gapps/gapps.zip \
             mnt/system \
             mnt/product
 
@@ -365,13 +376,37 @@ jobs:
         run: |
           sudo bash scripts/lib/inject-arm-trans.sh \
             arm-trans/ \
-            mnt/vendor
+            "${{ env.VENDOR_MNT }}"
+
+      - name: Write ARM bridge props
+        run: |
+          VPROP="${{ env.VENDOR_MNT }}/build.prop"
+          sudo touch "$VPROP"
+          for kv in \
+            "ro.product.cpu.abilist=x86_64,x86,arm64-v8a,armeabi-v7a,armeabi" \
+            "ro.product.cpu.abilist32=x86,armeabi-v7a,armeabi" \
+            "ro.product.cpu.abilist64=x86_64,arm64-v8a" \
+            "ro.dalvik.vm.native.bridge=libndk_translation.so" \
+            "ro.enable.native.bridge.exec=1" \
+            "ro.vendor.enable.native.bridge.exec=1" \
+            "ro.vendor.enable.native.bridge.exec64=1" \
+            "ro.ndk_translation.version=0.2.2"
+          do
+            key="${kv%%=*}"
+            if sudo grep -q "^${key}=" "$VPROP" 2>/dev/null; then
+              sudo sed -i "s|^${key}=.*|${kv}|" "$VPROP"
+            else
+              echo "$kv" | sudo tee -a "$VPROP" > /dev/null
+            fi
+          done
+          echo "=== ARM bridge props ==="
+          grep "ro\.dalvik\|ro\.enable\.native\|ro\.vendor\.enable\|ro\.ndk_translation\|abilist" "$VPROP"
 
       - name: Restore SELinux file contexts
         run: |
           if command -v restorecon &>/dev/null; then
             sudo restorecon -R -F mnt/system/priv-app/ 2>/dev/null || true
-            sudo restorecon -R -F mnt/vendor/lib/ndk_translation/ 2>/dev/null || true
+            sudo restorecon -R -F "${{ env.VENDOR_MNT }}/lib64/ndk_translation/" 2>/dev/null || true
           else
             echo "::notice::restorecon not available — Android init handles context labelling on first boot"
           fi
@@ -379,8 +414,14 @@ jobs:
       - name: Unmount partition images
         if: always()
         run: |
-          sudo umount mnt/system mnt/vendor mnt/product 2>/dev/null || true
-          sudo rmdir mnt/system mnt/vendor mnt/product 2>/dev/null || true
+          # Unmount separate vendor/product if they were mounted as loop devices
+          if [ -f work/vendor.raw ]; then
+            sudo umount mnt/vendor 2>/dev/null || true
+            sudo rmdir mnt/vendor 2>/dev/null || true
+          fi
+          sudo umount mnt/product 2>/dev/null || true
+          sudo umount mnt/system 2>/dev/null || true
+          sudo rmdir mnt/product mnt/system 2>/dev/null || true
 
       # ── Assemble bootable disk image ────────────────────────────────────────
       # Creates a GPT disk with an EFI partition (GRUB) and an ext4 Android data
@@ -489,7 +530,7 @@ jobs:
             Intermediate base image with GApps + ARM translation pre-baked.
 
             - ARM translation: libndk_translation (commit ${{ env.ARM_TRANS_COMMIT }})
-            - GApps: MindTheGapps 11.0.0 x86_64
+            - GApps: OpenGApps pico x86_64 11.0
 
             Verify before use:
             ```
@@ -531,7 +572,7 @@ jobs:
             Cache hit — image content unchanged from previous build.
 
             - ARM translation: libndk_translation (commit ${{ env.ARM_TRANS_COMMIT }})
-            - GApps: MindTheGapps 11.0.0 x86_64
+            - GApps: OpenGApps pico x86_64 11.0
 
             Verify before use:
             ```
@@ -581,7 +622,8 @@ jobs:
       - name: Mount and spot-check injected files
         run: |
           # Disk layout: GPT p1=EFI (FAT32), p2=Android data (ext4).
-          # system.img and vendor.img live as files on p2 and are loop-mounted.
+          # system.img lives on p2 and is loop-mounted. vendor.img may not
+          # exist (Bliss OS embeds vendor inside system.img at /vendor).
           sudo modprobe nbd max_part=8
           sleep 1
           sudo qemu-nbd --connect=/dev/nbd0 image-cache/${{ env.OUTPUT_IMAGE }}
@@ -592,17 +634,25 @@ jobs:
           echo "=== Partition layout ==="
           lsblk /dev/nbd0
 
-          sudo mkdir -p mnt/android mnt/system mnt/vendor
+          sudo mkdir -p mnt/android mnt/system
           sudo mount /dev/nbd0p2 mnt/android
 
           [ -f mnt/android/system.img ] \
             && sudo mount -o loop,ro mnt/android/system.img mnt/system \
-            || echo "::warning::system.img not found on data partition"
-          [ -f mnt/android/vendor.img ] \
-            && sudo mount -o loop,ro mnt/android/vendor.img mnt/vendor \
-            || echo "No vendor.img — vendor checks skipped"
+            || { echo "::error::system.img not found on data partition"; exit 1; }
 
-          echo "=== GApps presence ==="
+          # vendor is either a separate image or a directory inside system
+          HAS_VENDOR_IMG=false
+          if [ -f mnt/android/vendor.img ]; then
+            sudo mkdir -p mnt/vendor
+            sudo mount -o loop,ro mnt/android/vendor.img mnt/vendor
+            HAS_VENDOR_IMG=true
+            VENDOR_CHECK_ROOT="mnt/vendor"
+          else
+            echo "No separate vendor.img — checking mnt/system/vendor"
+            VENDOR_CHECK_ROOT="mnt/system/vendor"
+          fi
+
           FAIL=0
           check_file() {
             if [ -e "$1" ]; then
@@ -612,25 +662,28 @@ jobs:
               FAIL=$((FAIL+1))
             fi
           }
+
+          echo "=== GApps presence ==="
           check_file mnt/system/priv-app/GmsCore
           check_file mnt/system/etc/permissions/privapp-permissions-google.xml
 
           echo "=== ARM translation presence ==="
-          check_file mnt/vendor/lib64/ndk_translation/libndk_translation.so
-          check_file mnt/vendor/etc/binfmt_misc
+          check_file "${VENDOR_CHECK_ROOT}/lib64/ndk_translation/libndk_translation.so"
+          check_file "${VENDOR_CHECK_ROOT}/etc/binfmt_misc"
 
           echo "=== ARM bridge props ==="
-          if sudo grep -q "ro.dalvik.vm.native.bridge=libndk_translation.so" \
-               mnt/vendor/build.prop 2>/dev/null; then
+          VPROP="${VENDOR_CHECK_ROOT}/build.prop"
+          if [ -f "$VPROP" ] && grep -q "ro.dalvik.vm.native.bridge=libndk_translation.so" "$VPROP"; then
             echo "  ✓ ro.dalvik.vm.native.bridge present"
           else
-            echo "  ✗ ro.dalvik.vm.native.bridge missing from vendor/build.prop"
+            echo "  ✗ ro.dalvik.vm.native.bridge missing from ${VPROP}"
             FAIL=$((FAIL+1))
           fi
 
-          sudo umount mnt/system mnt/vendor mnt/android 2>/dev/null || true
+          $HAS_VENDOR_IMG && sudo umount mnt/vendor 2>/dev/null || true
+          sudo umount mnt/system mnt/android 2>/dev/null || true
           sudo qemu-nbd --disconnect /dev/nbd0 2>/dev/null || true
-          sudo rmdir mnt/system mnt/vendor mnt/android 2>/dev/null || true
+          sudo rmdir mnt/vendor mnt/system mnt/android 2>/dev/null || true
 
           if [ "$FAIL" -gt 0 ]; then
             echo "::error::$FAIL static check(s) failed"

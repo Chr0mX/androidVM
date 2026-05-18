@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Inject MindTheGapps 11.0.0 x86_64 into a mounted system/product partition.
+# Inject GApps into a mounted system/product partition.
+# Supports both OpenGApps (Core/*.tar.lz) and MindTheGapps (system/ + product/) formats.
 #
 # Usage: inject-gapps.sh <gapps.zip> <system-mnt> <product-mnt>
 set -euo pipefail
@@ -19,43 +20,74 @@ trap 'rm -rf "$tmpdir"' EXIT
 echo "[inject-gapps] Unpacking $GAPPS_ZIP ..."
 unzip -q "$GAPPS_ZIP" -d "$tmpdir"
 
-# System-side APKs and libraries
-if [ -d "$tmpdir/system" ]; then
-  rsync -a "$tmpdir/system/" "$SYSTEM_MNT/"
+if [ -d "${tmpdir}/Core" ]; then
+  # ── OpenGApps format ──────────────────────────────────────────────────────
+  # Each Core/*.tar.lz extracts to a tree rooted at "system/".
+  echo "[inject-gapps] Detected OpenGApps format"
+
+  extract_dir="${tmpdir}/extracted"
+  mkdir -p "$extract_dir"
+
+  for archive in "${tmpdir}/Core"/*.tar.lz; do
+    [ -f "$archive" ] || continue
+    echo "[inject-gapps] Extracting $(basename "$archive") ..."
+    # tar --lzip requires lzip on PATH; fall back to explicit pipe
+    tar --lzip -xf "$archive" -C "$extract_dir" 2>/dev/null \
+      || lzip -dc "$archive" | tar -x -C "$extract_dir"
+  done
+
+  # Copy system-side files
+  if [ -d "${extract_dir}/system" ]; then
+    rsync -a "${extract_dir}/system/" "${SYSTEM_MNT}/"
+    echo "[inject-gapps] Copied OpenGApps system tree"
+  else
+    echo "[inject-gapps] WARNING: no system/ directory found in OpenGApps archives" >&2
+  fi
+
+  # Copy product-side files if present
+  if [ -d "${extract_dir}/product" ]; then
+    rsync -a "${extract_dir}/product/" "${PRODUCT_MNT}/"
+    echo "[inject-gapps] Copied OpenGApps product tree"
+  fi
+
+  # Permissions XML — some OpenGApps builds ship it outside the tar archives
+  PERM_SRC=$(find "$tmpdir" -name "privapp-permissions-google*.xml" | head -1)
+  if [ -n "$PERM_SRC" ]; then
+    install -D -m 644 "$PERM_SRC" \
+      "${SYSTEM_MNT}/etc/permissions/privapp-permissions-google.xml"
+    echo "[inject-gapps] Installed privapp-permissions-google.xml"
+  fi
+
+elif [ -d "${tmpdir}/system" ]; then
+  # ── MindTheGapps format ───────────────────────────────────────────────────
+  echo "[inject-gapps] Detected MindTheGapps format"
+  rsync -a "${tmpdir}/system/" "${SYSTEM_MNT}/"
   echo "[inject-gapps] Copied system-side GApps"
-fi
 
-# Product-side APKs (Play Store, GMS config, etc.)
-if [ -d "$tmpdir/product" ]; then
-  rsync -a "$tmpdir/product/" "$PRODUCT_MNT/"
-  echo "[inject-gapps] Copied product-side GApps"
-fi
+  if [ -d "${tmpdir}/product" ]; then
+    rsync -a "${tmpdir}/product/" "${PRODUCT_MNT}/"
+    echo "[inject-gapps] Copied product-side GApps"
+  fi
 
-# Privapp permissions whitelist — required or GMS crashes silently on entitled APIs
-PERM_SRC="$tmpdir/system/etc/permissions/privapp-permissions-google.xml"
-if [ -f "$PERM_SRC" ]; then
-  install -D -m 644 "$PERM_SRC" \
-    "$SYSTEM_MNT/etc/permissions/privapp-permissions-google.xml"
-  echo "[inject-gapps] Installed privapp-permissions-google.xml"
+  PERM_SRC="${tmpdir}/system/etc/permissions/privapp-permissions-google.xml"
+  if [ -f "$PERM_SRC" ]; then
+    install -D -m 644 "$PERM_SRC" \
+      "${SYSTEM_MNT}/etc/permissions/privapp-permissions-google.xml"
+    echo "[inject-gapps] Installed privapp-permissions-google.xml"
+  else
+    echo "[inject-gapps] WARNING: privapp-permissions-google.xml not found in zip" >&2
+  fi
+
 else
-  echo "[inject-gapps] WARNING: privapp-permissions-google.xml not found in zip" >&2
+  echo "[inject-gapps] ERROR: Unrecognised GApps zip format" \
+       "(expected Core/ for OpenGApps or system/ for MindTheGapps)" >&2
+  echo "Top-level contents:" >&2
+  ls "$tmpdir" >&2
+  exit 1
 fi
 
-# SELinux MAC permissions — append Google contexts without clobbering existing
-SEINFO_SRC="$tmpdir/system/etc/seinfo/google.xml"
-SEINFO_DST="$SYSTEM_MNT/etc/seinfo/plat_mac_permissions.xml"
-if [ -f "$SEINFO_SRC" ] && [ -f "$SEINFO_DST" ]; then
-  cat "$SEINFO_SRC" >> "$SEINFO_DST"
-  echo "[inject-gapps] Appended GApps seinfo contexts"
-elif [ -f "$SEINFO_SRC" ]; then
-  install -D -m 644 "$SEINFO_SRC" "$SYSTEM_MNT/etc/seinfo/google.xml"
-  echo "[inject-gapps] Installed GApps seinfo (no existing plat_mac_permissions.xml)"
-fi
-
-# Restore SELinux file contexts for priv-app
 if command -v restorecon &>/dev/null; then
-  restorecon -R "$SYSTEM_MNT/priv-app/" 2>/dev/null || true
-  echo "[inject-gapps] Restored SELinux contexts for priv-app"
+  restorecon -R "${SYSTEM_MNT}/priv-app/" 2>/dev/null || true
 fi
 
 echo "[inject-gapps] Injection complete"
