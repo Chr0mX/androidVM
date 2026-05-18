@@ -48,6 +48,9 @@ env:
   GAPPS_SHA256: ""
   ARM_TRANS_COMMIT: "9324a8914b649b885dad6f2bfd14a67e5d1520bf"
   OUTPUT_IMAGE: "blissos14-gapps-arm.qcow2"
+  # Increment BUILD_VERSION whenever build logic changes (layout detection,
+  # injection paths, etc.) to invalidate the cache and force a fresh build.
+  BUILD_VERSION: "2"
 
 jobs:
   # ─── Job 1: validate inputs, compute cache key ───────────────────────────
@@ -107,6 +110,7 @@ jobs:
             "${{ env.SOURCE_IMG_SHA256 }}" \
             "${{ steps.urls.outputs.gapps_url }}" \
             "${{ env.ARM_TRANS_COMMIT }}" \
+            "${{ env.BUILD_VERSION }}" \
             "$(sha256sum scripts/lib/inject-gapps.sh scripts/lib/inject-arm-trans.sh \
                | awk '{print $1}' | tr -d '\n')" \
             | sha256sum | awk '{print $1}' | cut -c1-16)
