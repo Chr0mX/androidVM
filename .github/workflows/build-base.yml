@@ -20,9 +20,17 @@ on:
         type: boolean
         default: false
       gapps_url:
-        description: 'Override GApps download URL (leave blank for default)'
+        description: 'Override GApps download URL (leave blank for auto-resolve)'
         type: string
         default: ''
+      source_img_url:
+        description: 'Override Bliss OS ISO URL (leave blank to auto-resolve from SourceForge)'
+        type: string
+        default: ''
+      run_smoke_test:
+        description: 'Run full VM boot smoke test (requires self-hosted KVM runner)'
+        type: boolean
+        default: false
 
 # Only one build runs at a time — later runs cancel earlier queued ones
 concurrency:
@@ -30,13 +38,14 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Pinned source image — update ANDROID_IMG_SHA256 when moving to a new base
-  ANDROID_IMG_URL: "https://sourceforge.net/projects/android-x86/files/Release%209.0/android-x86_64-9.0-r2.iso"
-  ANDROID_IMG_SHA256: ""   # set this once you pin a specific release
+  # Source image is resolved at runtime from the SourceForge directory listing.
+  # Pin SOURCE_IMG_SHA256 once you have a known-good build to verify against.
+  SOURCE_IMG_SHA256: ""   # optional: pin to a specific release checksum
+  BLISSOS_SF_PATH: "Official/BlissOS14/FOSS/Generic"
   GAPPS_URL_DEFAULT: "https://github.com/nicholasbuse/mindthegapps/releases/download/20231114/MindTheGapps-11.0.0-x86_64-20231114_112039.zip"
   GAPPS_SHA256: "REPLACE_WITH_REAL_SHA256"
-  ARM_TRANS_TAG: "0.2.2"
-  OUTPUT_IMAGE: "android11-gapps-arm.qcow2"
+  ARM_TRANS_COMMIT: "9324a8914b649b885dad6f2bfd14a67e5d1520bf"
+  OUTPUT_IMAGE: "blissos14-gapps-arm.qcow2"
 
 jobs:
   # ─── Job 1: validate inputs, compute cache key ───────────────────────────
@@ -44,10 +53,38 @@ jobs:
     name: Preflight checks
     runs-on: ubuntu-22.04
     outputs:
-      cache_key: ${{ steps.key.outputs.cache_key }}
-      gapps_url: ${{ steps.urls.outputs.gapps_url }}
+      cache_key:          ${{ steps.key.outputs.cache_key }}
+      gapps_url:          ${{ steps.urls.outputs.gapps_url }}
+      source_img_url:     ${{ steps.source.outputs.url }}
+      source_img_filename: ${{ steps.source.outputs.filename }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve Bliss OS source image URL
+        id: source
+        run: |
+          if [ -n "${{ inputs.source_img_url }}" ]; then
+            # Manual override — parse out the filename from the URL
+            url="${{ inputs.source_img_url }}"
+            filename=$(basename "${url%%/download}")
+            echo "url=${url}"      >> $GITHUB_OUTPUT
+            echo "filename=${filename}" >> $GITHUB_OUTPUT
+            echo "Source override: ${url}"
+          else
+            # Auto-resolve: query the SourceForge directory listing API for
+            # the latest ISO in the BlissOS14/FOSS/Generic directory.
+            echo "Resolving latest Bliss OS ISO from SourceForge ..."
+            resolved=$(python3 scripts/lib/resolve-blissos-url.py \
+                         --path "${{ env.BLISSOS_SF_PATH }}" \
+                         --filter ".iso")
+            echo "$resolved"
+            url=$(echo      "$resolved" | grep '^url='      | cut -d= -f2-)
+            filename=$(echo "$resolved" | grep '^filename=' | cut -d= -f2-)
+            [ -n "$url" ]      || { echo "::error::Failed to resolve source URL"; exit 1; }
+            [ -n "$filename" ] || { echo "::error::Failed to resolve source filename"; exit 1; }
+            echo "url=${url}"           >> $GITHUB_OUTPUT
+            echo "filename=${filename}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Resolve GApps URL
         id: urls
@@ -65,9 +102,10 @@ jobs:
           # A cache hit means we can skip the multi-hour build and reuse the
           # previously uploaded artifact.
           hash=$(echo -n \
-            "${{ env.ANDROID_IMG_SHA256 }}" \
+            "${{ env.SOURCE_IMG_SHA256 }}" \
+            "${{ steps.source.outputs.url }}" \
             "${{ steps.urls.outputs.gapps_url }}" \
-            "${{ env.ARM_TRANS_TAG }}" \
+            "${{ env.ARM_TRANS_COMMIT }}" \
             "$(sha256sum scripts/lib/inject-gapps.sh scripts/lib/inject-arm-trans.sh \
                | awk '{print $1}' | tr -d '\n')" \
             | sha256sum | awk '{print $1}' | cut -c1-16)
@@ -77,6 +115,7 @@ jobs:
         run: |
           pip install jsonschema --quiet
           for f in profiles/*.json; do
+            [ "$(basename "$f")" = "schema.json" ] && continue
             echo "Validating $f"
             python3 scripts/lib/profile-validator.py "$f"
           done
@@ -97,60 +136,77 @@ jobs:
           key: ${{ needs.preflight.outputs.cache_key }}
           lookup-only: true
 
-  # ─── Job 3: build the intermediate image (runs on self-hosted for KVM) ───
+  # ─── Job 3: build the intermediate image ─────────────────────────────────
+  #
+  # Runs on standard GitHub-hosted ubuntu-22.04 runners. KVM is NOT required
+  # here — the image is built via offline NBD mount + file injection, which is
+  # pure userspace. If /dev/kvm happens to be present the step logs it, but
+  # the build never tries to boot the VM.
+  #
+  # Note on performance: without KVM, QEMU TCG would be slow — but this job
+  # never boots QEMU. qemu-nbd and qemu-img are host tools only. Runtime is
+  # dominated by download speeds and rsync, not emulation.
   build:
     name: Build intermediate image
     needs: [preflight, check-cache]
-    # Skip if cache is valid and not forcing a rebuild
     if: needs.check-cache.outputs.cache_hit != 'true' || inputs.force_rebuild == true
-    # GitHub-hosted ubuntu-22.04 runners do NOT have /dev/kvm.
-    # Register a self-hosted runner tagged 'kvm' for real builds.
-    # To register: Settings → Actions → Runners → New self-hosted runner
-    #              Label it: self-hosted, linux, kvm
-    runs-on: [self-hosted, linux, kvm]
-    timeout-minutes: 120
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    outputs:
+      release_tag: ${{ steps.tag.outputs.tag }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Detect execution environment
+        id: env_detect
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo "kvm=true" >> $GITHUB_OUTPUT
+            echo "KVM available — hardware acceleration present"
+          else
+            echo "kvm=false" >> $GITHUB_OUTPUT
+            echo "::notice::KVM not available on this runner. Build uses offline NBD" \
+                 "mount only and does not boot the VM, so this is fine."
+          fi
 
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            qemu-system-x86 qemu-utils qemu-kvm \
-            android-tools-adb simg2img img2simg \
-            e2fsck python3 python3-pip jq curl rsync \
-            ovmf p7zip-full
+            qemu-system-x86 qemu-utils \
+            android-tools-adb simg2img \
+            e2fsprogs python3 python3-pip jq curl rsync \
+            ovmf p7zip-full lzip unzip \
+            grub-efi-amd64-bin parted
           pip3 install jsonschema --quiet
 
-      - name: Verify KVM is accessible
-        run: |
-          if [ ! -e /dev/kvm ]; then
-            echo "::warning::/dev/kvm not available — build will use TCG (slow)"
-          else
-            echo "KVM available: $(ls -la /dev/kvm)"
-          fi
-
-      # ── Download & verify Android x86_64 source image ──────────────────
+      # ── Download & verify Bliss OS source image ────────────────────────
       - name: Cache source image download
         uses: actions/cache@v4
         id: source-cache
         with:
           path: source-image/
-          key: android-source-${{ env.ANDROID_IMG_SHA256 }}
+          key: source-img-${{ needs.preflight.outputs.source_img_url }}
 
-      - name: Download Android x86_64 image
+      - name: Download Bliss OS ISO
         if: steps.source-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p source-image
+          echo "Downloading: ${{ needs.preflight.outputs.source_img_filename }}"
+          echo "URL: ${{ needs.preflight.outputs.source_img_url }}"
           curl -L --retry 5 --retry-delay 10 \
-            "${{ env.ANDROID_IMG_URL }}" \
-            -o source-image/android11.img
-          if [ -n "${{ env.ANDROID_IMG_SHA256 }}" ]; then
-            echo "${{ env.ANDROID_IMG_SHA256 }}  source-image/android11.img" | sha256sum -c
+            "${{ needs.preflight.outputs.source_img_url }}" \
+            -o source-image/source.img
+          if [ -n "${{ env.SOURCE_IMG_SHA256 }}" ]; then
+            echo "${{ env.SOURCE_IMG_SHA256 }}  source-image/source.img" | sha256sum -c
           else
-            echo "::warning::No SHA256 pinned for source image — skipping checksum"
+            echo "::warning::No SHA256 pinned — skipping checksum. Set SOURCE_IMG_SHA256 to lock a specific release."
           fi
+          # Verify the download is actually an ISO, not an HTML redirect page
+          file source-image/source.img
+          file source-image/source.img | grep -qi "ISO 9660\|CD-ROM" \
+            || { echo "::error::Downloaded file is not an ISO — SourceForge may have served HTML instead of the file."; exit 1; }
 
       # ── Download & verify GApps ─────────────────────────────────────────
       - name: Cache GApps download
@@ -178,54 +234,80 @@ jobs:
         id: armtrans-cache
         with:
           path: arm-trans/
-          key: arm-trans-${{ env.ARM_TRANS_TAG }}
+          key: arm-trans-${{ env.ARM_TRANS_COMMIT }}
 
       - name: Download ARM translation
         if: steps.armtrans-cache.outputs.cache-hit != 'true'
         run: |
-          bash scripts/lib/fetch-arm-trans.sh "${{ env.ARM_TRANS_TAG }}" arm-trans/
+          bash scripts/lib/fetch-arm-trans.sh arm-trans/
 
-      # ── Prepare working image ───────────────────────────────────────────
-      - name: Convert source to qcow2
+      # ── Extract partition images from ISO ──────────────────────────────────
+      # The source is an ISO9660 image, not a partitioned disk. It contains
+      # system.img (and optionally vendor.img/product.img) as plain files inside
+      # the ISO filesystem. We extract and loop-mount them directly.
+      - name: Extract partition images from ISO
         run: |
-          mkdir -p work
-          qemu-img convert -f raw -O qcow2 \
-            source-image/android11.img work/android11-base.qcow2
-          qemu-img info work/android11-base.qcow2
+          mkdir -p iso-mount work
+          sudo mount -o loop,ro source-image/source.img iso-mount
 
-      - name: Create intermediate layer
-        run: |
-          qemu-img create -f qcow2 \
-            -b work/android11-base.qcow2 \
-            -F qcow2 \
-            work/${{ env.OUTPUT_IMAGE }}
+          echo "=== ISO root contents ==="
+          ls -la iso-mount/
 
-      # ── Mount and patch ─────────────────────────────────────────────────
-      - name: Load nbd module
-        run: |
-          sudo modprobe nbd max_part=8
-          sleep 1
+          FOUND=0
+          for name in system vendor product; do
+            for candidate in "${name}.img" "${name}/${name}.img"; do
+              if [ -f "iso-mount/${candidate}" ]; then
+                size=$(du -sh "iso-mount/${candidate}" | cut -f1)
+                echo "Extracting ${candidate} (${size}) ..."
+                cp "iso-mount/${candidate}" "work/${name}.img"
+                FOUND=$((FOUND+1))
+                break
+              fi
+            done
+          done
 
-      - name: Mount intermediate image via NBD
+          # Save boot files needed for final disk assembly
+          for item in kernel initrd.img ramdisk.img isolinux grub efi; do
+            [ -e "iso-mount/${item}" ] && cp -r "iso-mount/${item}" "work/boot-${item}" || true
+          done
+
+          sudo umount iso-mount
+          rmdir iso-mount
+
+          [ "$FOUND" -gt 0 ] || { echo "::error::No partition images found in ISO root"; exit 1; }
+          echo "Extracted ${FOUND} partition image(s)"
+          ls -lh work/
+
+      - name: Convert Android sparse images to raw ext4
         run: |
-          sudo qemu-nbd --connect=/dev/nbd0 work/${{ env.OUTPUT_IMAGE }}
-          sleep 2
-          lsblk /dev/nbd0
+          for name in system vendor product; do
+            src="work/${name}.img"
+            [ -f "$src" ] || continue
+            dst="work/${name}.raw"
+            echo "Converting ${name}.img ..."
+            simg2img "$src" "$dst" 2>/dev/null \
+              && echo "  sparse → raw" \
+              || { cp "$src" "$dst"; echo "  as-is (not sparse)"; }
+            rm -f "$src"
+            file "$dst"
+          done
+
+      - name: Resize system image to accommodate GApps
+        run: |
+          # GApps adds ~400-500 MB; add 600 MB headroom before injection
+          e2fsck -yf work/system.raw || true
+          resize2fs work/system.raw +600M
+          e2fsck -yf work/system.raw || true
+
+      # ── Loop-mount raw images and inject ───────────────────────────────────
+      - name: Mount partition images
+        run: |
           sudo mkdir -p mnt/{system,vendor,product}
-
-      - name: Detect and mount partitions
-        run: |
-          PARTS=$(lsblk -o NAME,FSTYPE /dev/nbd0 --json | python3 -c "
-          import json,sys
-          data=json.load(sys.stdin)
-          for child in data['blockdevices'][0].get('children',[]):
-              print(child['name'], child.get('fstype',''))
-          ")
-          echo "Partition map:"
-          echo "$PARTS"
-          sudo mount /dev/nbd0p2 mnt/system
-          sudo mount /dev/nbd0p5 mnt/vendor
-          sudo mount /dev/nbd0p6 mnt/product || echo "No product partition — skipping"
+          sudo mount -o loop,rw work/system.raw mnt/system
+          [ -f work/vendor.raw ]  && sudo mount -o loop,rw work/vendor.raw  mnt/vendor  \
+            || echo "No vendor partition — vendor injection skipped"
+          [ -f work/product.raw ] && sudo mount -o loop,rw work/product.raw mnt/product \
+            || echo "No product partition — product injection skipped"
 
       - name: Inject GApps
         run: |
@@ -242,22 +324,96 @@ jobs:
 
       - name: Restore SELinux file contexts
         run: |
-          sudo chroot mnt/system /sbin/restorecon -R /priv-app/ 2>/dev/null || true
-          sudo chroot mnt/vendor /sbin/restorecon -R /lib/ndk_translation/ 2>/dev/null || true
+          if command -v restorecon &>/dev/null; then
+            sudo restorecon -R -F mnt/system/priv-app/ 2>/dev/null || true
+            sudo restorecon -R -F mnt/vendor/lib/ndk_translation/ 2>/dev/null || true
+          else
+            echo "::notice::restorecon not available — Android init handles context labelling on first boot"
+          fi
 
-      - name: Unmount and disconnect
+      - name: Unmount partition images
         if: always()
         run: |
           sudo umount mnt/system mnt/vendor mnt/product 2>/dev/null || true
-          sudo qemu-nbd --disconnect /dev/nbd0 2>/dev/null || true
           sudo rmdir mnt/system mnt/vendor mnt/product 2>/dev/null || true
 
-      # ── Flatten and checksum ────────────────────────────────────────────
-      - name: Flatten backing chain into portable single image
+      # ── Assemble bootable disk image ────────────────────────────────────────
+      # Creates a GPT disk with an EFI partition (GRUB) and an ext4 Android data
+      # partition containing the modified system.img, kernel, and ramdisk.
+      # Android x86 boots by having GRUB loop-mount system.img from the data partition.
+      - name: Assemble bootable disk image
+        run: |
+          SYSTEM_SZ=$(stat -c%s work/system.raw)
+          VENDOR_SZ=$([ -f work/vendor.raw  ] && stat -c%s work/vendor.raw  || echo 0)
+          PRODUCT_SZ=$([ -f work/product.raw ] && stat -c%s work/product.raw || echo 0)
+          BOOT_SZ=$(find work/ -maxdepth 1 -name 'boot-*' -exec du -sb {} + 2>/dev/null \
+                    | awk '{s+=$1}END{print s+0}')
+
+          # EFI partition: 256 MB; data partition: content + 20% + 256 MB buffer
+          DATA_CONTENT=$(( SYSTEM_SZ + VENDOR_SZ + PRODUCT_SZ + BOOT_SZ ))
+          DATA_SZ=$(( DATA_CONTENT * 12 / 10 + 256 * 1024 * 1024 ))
+          DISK_SZ=$(( DATA_SZ + 256 * 1024 * 1024 + 4 * 1024 * 1024 ))
+          echo "Disk size: $(( DISK_SZ / 1024 / 1024 )) MB  (data $(( DATA_SZ / 1024 / 1024 )) MB)"
+
+          truncate -s $DISK_SZ work/disk.raw
+
+          sudo parted -s work/disk.raw \
+            mklabel gpt \
+            mkpart EFI  fat32 1MiB   257MiB \
+            set 1 esp on \
+            mkpart Data ext4  257MiB 100%
+
+          LOOP=$(sudo losetup --find --show --partscan work/disk.raw)
+          echo "Loop device: $LOOP"
+          sleep 1
+
+          sudo mkfs.fat -F32 -n EFI    "${LOOP}p1"
+          sudo mkfs.ext4 -L Android    "${LOOP}p2"
+
+          sudo mkdir -p mnt/efi mnt/android
+          sudo mount "${LOOP}p1" mnt/efi
+          sudo mount "${LOOP}p2" mnt/android
+
+          # Copy Android system files to data partition
+          sudo cp work/system.raw  mnt/android/system.img
+          [ -f work/vendor.raw  ] && sudo cp work/vendor.raw  mnt/android/vendor.img  || true
+          [ -f work/product.raw ] && sudo cp work/product.raw mnt/android/product.img || true
+          [ -f work/boot-kernel ]        && sudo cp work/boot-kernel        mnt/android/kernel       || true
+          [ -f work/boot-ramdisk.img ]   && sudo cp work/boot-ramdisk.img   mnt/android/ramdisk.img  || true
+          [ -f work/boot-initrd.img ]    && sudo cp work/boot-initrd.img    mnt/android/initrd.img   || true
+
+          # Install GRUB EFI
+          sudo grub-install \
+            --target=x86_64-efi \
+            --efi-directory=mnt/efi \
+            --boot-directory=mnt/android/boot \
+            --removable \
+            --no-nvram
+
+          # GRUB config — Android x86 standard kernel cmdline
+          sudo mkdir -p mnt/android/boot/grub
+          sudo tee mnt/android/boot/grub/grub.cfg > /dev/null << 'GRUBCFG'
+          set default=0
+          set timeout=3
+
+          menuentry "Android-x86" {
+            search --set=root --label Android
+            linux  /kernel root=/dev/ram0 androidboot.hardware=android_x86_64 \
+                   androidboot.selinux=enforcing DATA=
+            initrd /ramdisk.img
+          }
+          GRUBCFG
+
+          sudo umount mnt/efi mnt/android
+          sudo rmdir  mnt/efi mnt/android
+          sudo losetup -d "$LOOP"
+
+      # ── Convert to qcow2 and checksum ───────────────────────────────────────
+      - name: Convert disk image to qcow2
         run: |
           mkdir -p image-cache
           qemu-img convert -O qcow2 -c \
-            work/${{ env.OUTPUT_IMAGE }} \
+            work/disk.raw \
             image-cache/${{ env.OUTPUT_IMAGE }}
           qemu-img info image-cache/${{ env.OUTPUT_IMAGE }}
 
@@ -287,7 +443,7 @@ jobs:
           body: |
             Intermediate base image with GApps + ARM translation pre-baked.
 
-            - ARM translation: libndk_translation ${{ env.ARM_TRANS_TAG }}
+            - ARM translation: libndk_translation (commit ${{ env.ARM_TRANS_COMMIT }})
             - GApps: MindTheGapps 11.0.0 x86_64
 
             Verify before use:
@@ -317,27 +473,165 @@ jobs:
           echo "Cache hit — skipping build"
           ls -lh image-cache/
 
-  # ─── Job 5: smoke test — boot the image headlessly and check ADB ──────
-  smoke-test:
-    name: Smoke test
-    needs: [build]
+      - name: Create release tag
+        id: tag
+        run: echo "tag=base-$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
+
+      - name: Upload cached image to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "Base image ${{ steps.tag.outputs.tag }} (cached)"
+          body: |
+            Cache hit — image content unchanged from previous build.
+
+            - ARM translation: libndk_translation (commit ${{ env.ARM_TRANS_COMMIT }})
+            - GApps: MindTheGapps 11.0.0 x86_64
+
+            Verify before use:
+            ```
+            sha256sum -c ${{ env.OUTPUT_IMAGE }}.sha256
+            ```
+          files: |
+            image-cache/${{ env.OUTPUT_IMAGE }}
+            image-cache/${{ env.OUTPUT_IMAGE }}.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ─── Job 5: static artifact validation (no KVM needed) ───────────────
+  #
+  # Runs on GitHub-hosted runners. Mounts the built image via NBD and spot-
+  # checks that key files were injected correctly. Catches injection failures
+  # without requiring a live VM boot.
+  validate-artifact:
+    name: Validate artifact (static)
+    needs: [preflight, build]
     if: needs.build.result == 'success'
-    runs-on: [self-hosted, linux, kvm]
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-utils python3 jq
+          pip3 install jsonschema --quiet
+
+      - name: Restore built image from cache
+        uses: actions/cache/restore@v4
+        with:
+          path: image-cache/
+          key: ${{ needs.preflight.outputs.cache_key }}
+
+      - name: Verify image integrity
+        run: |
+          echo "=== qemu-img check ==="
+          qemu-img check image-cache/${{ env.OUTPUT_IMAGE }}
+          echo "=== Image info ==="
+          qemu-img info image-cache/${{ env.OUTPUT_IMAGE }}
+          echo "=== Checksum ==="
+          cd image-cache && sha256sum -c ${{ env.OUTPUT_IMAGE }}.sha256
+
+      - name: Mount and spot-check injected files
+        run: |
+          # Disk layout: GPT p1=EFI (FAT32), p2=Android data (ext4).
+          # system.img and vendor.img live as files on p2 and are loop-mounted.
+          sudo modprobe nbd max_part=8
+          sleep 1
+          sudo qemu-nbd --connect=/dev/nbd0 image-cache/${{ env.OUTPUT_IMAGE }}
+          sleep 2
+          sudo partprobe /dev/nbd0
+          sleep 1
+
+          echo "=== Partition layout ==="
+          lsblk /dev/nbd0
+
+          sudo mkdir -p mnt/android mnt/system mnt/vendor
+          sudo mount /dev/nbd0p2 mnt/android
+
+          [ -f mnt/android/system.img ] \
+            && sudo mount -o loop,ro mnt/android/system.img mnt/system \
+            || echo "::warning::system.img not found on data partition"
+          [ -f mnt/android/vendor.img ] \
+            && sudo mount -o loop,ro mnt/android/vendor.img mnt/vendor \
+            || echo "No vendor.img — vendor checks skipped"
+
+          echo "=== GApps presence ==="
+          FAIL=0
+          check_file() {
+            if [ -e "$1" ]; then
+              echo "  ✓ $1"
+            else
+              echo "  ✗ MISSING: $1"
+              FAIL=$((FAIL+1))
+            fi
+          }
+          check_file mnt/system/priv-app/GmsCore
+          check_file mnt/system/etc/permissions/privapp-permissions-google.xml
+
+          echo "=== ARM translation presence ==="
+          check_file mnt/vendor/lib64/ndk_translation/libndk_translation.so
+          check_file mnt/vendor/etc/binfmt_misc
+
+          echo "=== ARM bridge props ==="
+          if sudo grep -q "ro.dalvik.vm.native.bridge=libndk_translation.so" \
+               mnt/vendor/build.prop 2>/dev/null; then
+            echo "  ✓ ro.dalvik.vm.native.bridge present"
+          else
+            echo "  ✗ ro.dalvik.vm.native.bridge missing from vendor/build.prop"
+            FAIL=$((FAIL+1))
+          fi
+
+          sudo umount mnt/system mnt/vendor mnt/android 2>/dev/null || true
+          sudo qemu-nbd --disconnect /dev/nbd0 2>/dev/null || true
+          sudo rmdir mnt/system mnt/vendor mnt/android 2>/dev/null || true
+
+          if [ "$FAIL" -gt 0 ]; then
+            echo "::error::$FAIL static check(s) failed"
+            exit 1
+          fi
+          echo "All static checks passed"
+
+  # ─── Job 6: full VM boot smoke test (optional, KVM only) ─────────────
+  #
+  # Only runs when explicitly requested via workflow_dispatch with
+  # run_smoke_test=true AND a self-hosted KVM runner is available.
+  # Never runs on push/schedule — it is not part of the default CI path.
+  #
+  # Software emulation (TCG) would take hours to boot Android and is not
+  # a viable fallback here. If no KVM runner is available, skip this job.
+  smoke-test:
+    name: Smoke test (KVM boot)
+    needs: [preflight, build]
+    if: inputs.run_smoke_test == true && needs.build.result == 'success'
+    runs-on: [self-hosted, linux, kvm]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm KVM is available
+        run: |
+          [ -e /dev/kvm ] || { echo "::error::/dev/kvm not found on this runner"; exit 1; }
+          echo "KVM confirmed: $(ls -la /dev/kvm)"
+
+      - name: Install ADB
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends android-tools-adb qemu-utils
+
       - name: Download built image from release
         run: |
-          gh release download --pattern "${{ env.OUTPUT_IMAGE }}" \
-            --dir image-cache/ latest
+          gh release download "${{ needs.build.outputs.release_tag }}" \
+            --pattern "${{ env.OUTPUT_IMAGE }}" \
+            --dir image-cache/
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create throw-away userdata volume
         run: qemu-img create -f qcow2 userdata-test.qcow2 4G
 
-      - name: Boot VM headlessly (30s timeout for ADB)
+      - name: Boot VM headlessly
         run: |
           qemu-system-x86_64 \
             -enable-kvm \
@@ -351,7 +645,7 @@ jobs:
             -display none \
             -daemonize \
             -pidfile /tmp/qemu.pid
-          echo "VM started, waiting for ADB..."
+          echo "VM started, waiting 30s for ADB..."
           sleep 30
 
       - name: ADB smoke checks
