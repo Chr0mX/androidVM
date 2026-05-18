@@ -336,9 +336,12 @@ jobs:
 
       - name: Resize system image to accommodate GApps
         run: |
-          # GApps adds ~400-500 MB; add 600 MB headroom before injection
+          # GApps adds ~400-500 MB; add 600 MB headroom before injection.
+          # truncate -s +600M grows the backing file; resize2fs with no size
+          # argument then expands the filesystem to fill the extra space.
           e2fsck -yf work/system.raw || true
-          resize2fs work/system.raw +600M
+          truncate -s +600M work/system.raw
+          resize2fs work/system.raw
           e2fsck -yf work/system.raw || true
 
       # ── Loop-mount raw images and inject ───────────────────────────────────
