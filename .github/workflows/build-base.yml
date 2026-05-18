@@ -360,10 +360,22 @@ jobs:
             sudo mount -o loop,rw work/vendor.raw mnt/vendor
             echo "VENDOR_MNT=mnt/vendor" >> "$GITHUB_ENV"
           else
-            # vendor is inside system.raw — the path may already exist (dir or symlink)
-            sudo test -e mnt/system/vendor || sudo mkdir -p mnt/system/vendor
-            echo "VENDOR_MNT=mnt/system/vendor" >> "$GITHUB_ENV"
-            echo "No separate vendor.img — using mnt/system/vendor"
+            # vendor is inside system.raw. /vendor in the Android rootfs is often a
+            # symlink (e.g. -> /system/vendor). Resolve it so we write to the real path.
+            VPATH="mnt/system/vendor"
+            if sudo test -L "$VPATH"; then
+              link_target=$(sudo readlink "$VPATH")
+              if [[ "$link_target" = /* ]]; then
+                # Absolute symlink — rebase onto our mount point
+                VPATH="mnt/system${link_target}"
+              else
+                VPATH="mnt/system/$(dirname vendor)/${link_target}"
+              fi
+              echo "Resolved /vendor symlink -> ${link_target}, using ${VPATH}"
+            fi
+            sudo mkdir -p "$VPATH"
+            echo "VENDOR_MNT=${VPATH}" >> "$GITHUB_ENV"
+            echo "No separate vendor.img — using ${VPATH}"
           fi
 
       - name: Inject GApps
