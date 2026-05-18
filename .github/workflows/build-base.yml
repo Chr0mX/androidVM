@@ -396,10 +396,17 @@ jobs:
 
       - name: Inject GApps
         run: |
+          echo "=== GApps zip top-level structure ==="
+          unzip -l gapps/gapps.zip | head -40
+          echo "=== Running injection ==="
           sudo bash scripts/lib/inject-gapps.sh \
             gapps/gapps.zip \
             "${{ env.SYSTEM_MNT }}" \
             mnt/product
+          echo "=== Post-injection priv-app ==="
+          sudo ls -la "${{ env.SYSTEM_MNT }}/priv-app/" || true
+          sudo test -d "${{ env.SYSTEM_MNT }}/priv-app/GmsCore" \
+            || { echo "::error::GmsCore not found after injection at ${{ env.SYSTEM_MNT }}/priv-app/"; exit 1; }
 
       - name: Inject ARM translation
         run: |

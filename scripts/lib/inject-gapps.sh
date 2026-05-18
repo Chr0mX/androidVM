@@ -29,20 +29,38 @@ trap 'rm -rf "$tmpdir"' EXIT
 echo "[inject-gapps] Unpacking $GAPPS_ZIP ..."
 unzip -q "$GAPPS_ZIP" -d "$tmpdir"
 
+echo "[inject-gapps] Zip top-level contents:"
+ls "$tmpdir"
+
 if [ -d "${tmpdir}/Core" ]; then
   # ── OpenGApps format ──────────────────────────────────────────────────────
   echo "[inject-gapps] Detected OpenGApps format"
+  echo "[inject-gapps] Core directory contents:"
+  ls "${tmpdir}/Core/"
 
   extract_dir="${tmpdir}/extracted"
   mkdir -p "$extract_dir"
 
+  archive_count=0
   for archive in "${tmpdir}/Core"/*.tar.lz; do
     [ -f "$archive" ] || continue
+    archive_count=$((archive_count + 1))
     echo "[inject-gapps] Extracting $(basename "$archive") ..."
-    tar --lzip -xf "$archive" -C "$extract_dir" 2>/dev/null \
+    tar --lzip -xf "$archive" -C "$extract_dir" \
       || lzip -dc "$archive" | tar -x -C "$extract_dir"
   done
 
+  if [ "$archive_count" -eq 0 ]; then
+    echo "[inject-gapps] ERROR: No .tar.lz archives found in Core/" >&2
+    echo "[inject-gapps] Core directory:" >&2
+    ls "${tmpdir}/Core/" >&2
+    exit 1
+  fi
+
+  echo "[inject-gapps] Extracted $archive_count archive(s). Extracted contents:"
+  ls "$extract_dir"
+
+  apk_count=0
   for entry in "${extract_dir}"/*/; do
     [ -d "$entry" ] || continue
     name=$(basename "$entry")
@@ -59,16 +77,28 @@ if [ -d "${tmpdir}/Core" ]; then
     else
       # APK package directory: <PkgName>/<dpi>/<PkgName>.apk
       apk=$(find "$entry" -name "*.apk" | head -1)
-      [ -n "$apk" ] || continue
+      if [ -z "$apk" ]; then
+        echo "[inject-gapps] WARN: No APK found in ${name}/, skipping"
+        continue
+      fi
       dest="${SYSTEM_MNT}/priv-app/${name}"
       mkdir -p "$dest"
       cp "$apk" "${dest}/${name}.apk"
       # Copy native libs if present
       lib_dir=$(find "$entry" -maxdepth 2 -name "lib" -type d | head -1)
       [ -n "$lib_dir" ] && rsync -a "${lib_dir}/" "${dest}/lib/" || true
-      echo "[inject-gapps] Installed priv-app/${name}"
+      apk_count=$((apk_count + 1))
+      echo "[inject-gapps] Installed priv-app/${name} (from $(basename "$apk"))"
     fi
   done
+
+  if [ "$apk_count" -eq 0 ]; then
+    echo "[inject-gapps] ERROR: No APK packages were installed" >&2
+    echo "[inject-gapps] Extracted directory contents:" >&2
+    find "$extract_dir" -maxdepth 3 >&2
+    exit 1
+  fi
+  echo "[inject-gapps] Installed $apk_count APK package(s)"
 
 elif [ -d "${tmpdir}/system" ]; then
   # ── MindTheGapps format ───────────────────────────────────────────────────
