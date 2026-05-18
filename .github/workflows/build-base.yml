@@ -211,7 +211,7 @@ jobs:
       - name: Create intermediate layer
         run: |
           qemu-img create -f qcow2 \
-            -b work/android11-base.qcow2 \
+            -b "$(pwd)/work/android11-base.qcow2" \
             -F qcow2 \
             work/${{ env.OUTPUT_IMAGE }}
 
