@@ -354,35 +354,40 @@ jobs:
           sudo mount -o loop,rw work/system.raw mnt/system
           [ -f work/product.raw ] && sudo mount -o loop,rw work/product.raw mnt/product \
             || echo "No product partition — product injection skipped"
-          # Bliss OS has no separate vendor.img; vendor lives at system/vendor/
+
+      - name: Detect system image layout
+        run: |
+          # Bliss OS system.img is the Android *rootfs* (not just /system partition).
+          # Real system files live at /system/ inside the rootfs, so on the host
+          # they are at mnt/system/system/. Top-level entries like /etc, /vendor,
+          # /lib are compatibility symlinks (e.g. /vendor -> /system/vendor) that
+          # dangle outside a running Android environment.
+          if [ -d "mnt/system/system" ]; then
+            SYS="mnt/system/system"
+            echo "Rootfs image detected — system files at ${SYS}/"
+          else
+            SYS="mnt/system"
+            echo "System-partition image detected — system files at ${SYS}/"
+          fi
+
           if [ -f work/vendor.raw ]; then
             sudo mkdir -p mnt/vendor
             sudo mount -o loop,rw work/vendor.raw mnt/vendor
-            echo "VENDOR_MNT=mnt/vendor" >> "$GITHUB_ENV"
+            VENDOR="${SYS}/vendor"
           else
-            # vendor is inside system.raw. /vendor in the Android rootfs is often a
-            # symlink (e.g. -> /system/vendor). Resolve it so we write to the real path.
-            VPATH="mnt/system/vendor"
-            if sudo test -L "$VPATH"; then
-              link_target=$(sudo readlink "$VPATH")
-              if [[ "$link_target" = /* ]]; then
-                # Absolute symlink — rebase onto our mount point
-                VPATH="mnt/system${link_target}"
-              else
-                VPATH="mnt/system/$(dirname vendor)/${link_target}"
-              fi
-              echo "Resolved /vendor symlink -> ${link_target}, using ${VPATH}"
-            fi
-            sudo mkdir -p "$VPATH"
-            echo "VENDOR_MNT=${VPATH}" >> "$GITHUB_ENV"
-            echo "No separate vendor.img — using ${VPATH}"
+            VENDOR="${SYS}/vendor"
+            sudo mkdir -p "$VENDOR"
           fi
+
+          echo "SYSTEM_MNT=${SYS}"   >> "$GITHUB_ENV"
+          echo "VENDOR_MNT=${VENDOR}" >> "$GITHUB_ENV"
+          echo "Using SYSTEM_MNT=${SYS}, VENDOR_MNT=${VENDOR}"
 
       - name: Inject GApps
         run: |
           sudo bash scripts/lib/inject-gapps.sh \
             gapps/gapps.zip \
-            mnt/system \
+            "${{ env.SYSTEM_MNT }}" \
             mnt/product
 
       - name: Inject ARM translation
@@ -418,7 +423,7 @@ jobs:
       - name: Restore SELinux file contexts
         run: |
           if command -v restorecon &>/dev/null; then
-            sudo restorecon -R -F mnt/system/priv-app/ 2>/dev/null || true
+            sudo restorecon -R -F "${{ env.SYSTEM_MNT }}/priv-app/" 2>/dev/null || true
             sudo restorecon -R -F "${{ env.VENDOR_MNT }}/lib64/ndk_translation/" 2>/dev/null || true
           else
             echo "::notice::restorecon not available — Android init handles context labelling on first boot"
@@ -654,16 +659,24 @@ jobs:
             && sudo mount -o loop,ro mnt/android/system.img mnt/system \
             || { echo "::error::system.img not found on data partition"; exit 1; }
 
-          # vendor is either a separate image or a directory inside system
+          # Detect rootfs vs system-partition image (same logic as build job)
+          if [ -d "mnt/system/system" ]; then
+            SYS="mnt/system/system"
+            echo "Rootfs image — system files at ${SYS}/"
+          else
+            SYS="mnt/system"
+          fi
+
+          # vendor: separate image or directory inside system
           HAS_VENDOR_IMG=false
           if [ -f mnt/android/vendor.img ]; then
             sudo mkdir -p mnt/vendor
             sudo mount -o loop,ro mnt/android/vendor.img mnt/vendor
             HAS_VENDOR_IMG=true
-            VENDOR_CHECK_ROOT="mnt/vendor"
+            VENDOR="${SYS}/vendor_img"   # just a label; real mount is mnt/vendor
+            VENDOR_CHECK="mnt/vendor"
           else
-            echo "No separate vendor.img — checking mnt/system/vendor"
-            VENDOR_CHECK_ROOT="mnt/system/vendor"
+            VENDOR_CHECK="${SYS}/vendor"
           fi
 
           FAIL=0
@@ -677,15 +690,15 @@ jobs:
           }
 
           echo "=== GApps presence ==="
-          check_file mnt/system/priv-app/GmsCore
-          check_file mnt/system/etc/permissions/privapp-permissions-google.xml
+          check_file "${SYS}/priv-app/GmsCore"
+          check_file "${SYS}/etc/permissions/privapp-permissions-google.xml"
 
           echo "=== ARM translation presence ==="
-          check_file "${VENDOR_CHECK_ROOT}/lib64/ndk_translation/libndk_translation.so"
-          check_file "${VENDOR_CHECK_ROOT}/etc/binfmt_misc"
+          check_file "${VENDOR_CHECK}/lib64/ndk_translation/libndk_translation.so"
+          check_file "${VENDOR_CHECK}/etc/binfmt_misc"
 
           echo "=== ARM bridge props ==="
-          VPROP="${VENDOR_CHECK_ROOT}/build.prop"
+          VPROP="${VENDOR_CHECK}/build.prop"
           if [ -f "$VPROP" ] && grep -q "ro.dalvik.vm.native.bridge=libndk_translation.so" "$VPROP"; then
             echo "  ✓ ro.dalvik.vm.native.bridge present"
           else
