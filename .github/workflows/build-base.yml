@@ -174,7 +174,7 @@ jobs:
             qemu-system-x86 qemu-utils \
             android-tools-adb simg2img \
             e2fsprogs python3 python3-pip jq curl rsync \
-            ovmf p7zip-full lzip unzip \
+            ovmf p7zip-full lzip unzip squashfs-tools \
             grub-efi-amd64-bin parted
           pip3 install jsonschema --quiet
 
@@ -257,9 +257,12 @@ jobs:
           bash scripts/lib/fetch-arm-trans.sh arm-trans/
 
       # ── Extract partition images from ISO ──────────────────────────────────
-      # The source is an ISO9660 image, not a partitioned disk. It contains
-      # system.img (and optionally vendor.img/product.img) as plain files inside
-      # the ISO filesystem. We extract and loop-mount them directly.
+      # Bliss OS ISOs use SquashFS: partition images live inside system.sfs
+      # (and optionally vendor.sfs / product.sfs) rather than as bare .img
+      # files. Pipeline:
+      #   1. Loop-mount the ISO
+      #   2. unsquashfs each .sfs → extracts system.img (etc.) from within
+      #   3. Fall back to bare .img files if no .sfs present
       - name: Extract partition images from ISO
         run: |
           mkdir -p iso-mount work
@@ -269,16 +272,40 @@ jobs:
           ls -la iso-mount/
 
           FOUND=0
+
           for name in system vendor product; do
-            for candidate in "${name}.img" "${name}/${name}.img"; do
-              if [ -f "iso-mount/${candidate}" ]; then
-                size=$(du -sh "iso-mount/${candidate}" | cut -f1)
-                echo "Extracting ${candidate} (${size}) ..."
-                cp "iso-mount/${candidate}" "work/${name}.img"
-                FOUND=$((FOUND+1))
-                break
-              fi
-            done
+            sfs="iso-mount/${name}.sfs"
+            img_direct="iso-mount/${name}.img"
+            img_subdir="iso-mount/${name}/${name}.img"
+
+            if [ -f "$sfs" ]; then
+              size=$(du -sh "$sfs" | cut -f1)
+              echo "Unsquashing ${name}.sfs (${size}) ..."
+              sudo unsquashfs -d "work/sfs-${name}" "$sfs"
+              # The .img may be at the squashfs root or one level in
+              for inner in "work/sfs-${name}/${name}.img" \
+                           "work/sfs-${name}/system.img" \
+                           "work/sfs-${name}/${name}/${name}.img"; do
+                if [ -f "$inner" ]; then
+                  mv "$inner" "work/${name}.img"
+                  FOUND=$((FOUND+1))
+                  break
+                fi
+              done
+              sudo rm -rf "work/sfs-${name}"
+
+            elif [ -f "$img_direct" ]; then
+              size=$(du -sh "$img_direct" | cut -f1)
+              echo "Copying ${name}.img (${size}) ..."
+              cp "$img_direct" "work/${name}.img"
+              FOUND=$((FOUND+1))
+
+            elif [ -f "$img_subdir" ]; then
+              size=$(du -sh "$img_subdir" | cut -f1)
+              echo "Copying ${name}/${name}.img (${size}) ..."
+              cp "$img_subdir" "work/${name}.img"
+              FOUND=$((FOUND+1))
+            fi
           done
 
           # Save boot files needed for final disk assembly
@@ -289,7 +316,7 @@ jobs:
           sudo umount iso-mount
           rmdir iso-mount
 
-          [ "$FOUND" -gt 0 ] || { echo "::error::No partition images found in ISO root"; exit 1; }
+          [ "$FOUND" -gt 0 ] || { echo "::error::No partition images (.sfs or .img) found in ISO"; exit 1; }
           echo "Extracted ${FOUND} partition image(s)"
           ls -lh work/
 
