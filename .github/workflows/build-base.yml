@@ -35,7 +35,7 @@ concurrency:
 
 env:
   # Pinned source image — update ANDROID_IMG_SHA256 when moving to a new base
-  ANDROID_IMG_URL: "https://sourceforge.net/projects/android-x86/files/Release%2011.0/android-x86_64-11.0-r4.iso"
+  ANDROID_IMG_URL: "https://sourceforge.net/projects/android-x86/files/Release%2011.0/android-x86_64-11.0-r4.iso/download"
   ANDROID_IMG_SHA256: ""   # set this once you pin a specific release
   GAPPS_URL_DEFAULT: "https://github.com/nicholasbuse/mindthegapps/releases/download/20231114/MindTheGapps-11.0.0-x86_64-20231114_112039.zip"
   GAPPS_SHA256: "REPLACE_WITH_REAL_SHA256"
@@ -167,6 +167,10 @@ jobs:
           else
             echo "::warning::No SHA256 pinned for source image — skipping checksum"
           fi
+          # Verify the download is actually an ISO, not an HTML redirect page
+          file source-image/android11.img
+          file source-image/android11.img | grep -qi "ISO 9660\|CD-ROM" \
+            || { echo "::error::Downloaded file is not an ISO — SourceForge may have served an HTML page. Check ANDROID_IMG_URL."; exit 1; }
 
       # ── Download & verify GApps ─────────────────────────────────────────
       - name: Cache GApps download
