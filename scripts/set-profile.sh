@@ -104,6 +104,16 @@ else
       "$MNT_PRODUCT/build.prop" product "$PROFILE_FILE"
   fi
 
+  # ── Patch GRUB config for userdata partition ──────────────────────────────
+  GRUB_CFG="${MNT_SYSTEM}/boot/grub/grub.cfg"
+  if [ -f "$GRUB_CFG" ]; then
+    log "Patching GRUB config: DATA=/dev/vdb ..."
+    sudo sed -i 's/ DATA= / DATA=\/dev\/vdb /g' "$GRUB_CFG"
+    sudo sed -i 's/ DATA=$/ DATA=\/dev\/vdb/' "$GRUB_CFG"
+  else
+    log "WARNING: GRUB config not found at ${GRUB_CFG} — userdata partition may not mount"
+  fi
+
   # ── Cleanup via trap ──────────────────────────────────────────────────────
   log "Sealing partitions ..."
 
