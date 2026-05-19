@@ -34,6 +34,10 @@ android-vm start [device-profile] [--vm-profile <name>]
 android-vm stop [device-profile]
     # Stop a running VM (SIGTERM → SIGKILL after 10 s).
 
+android-vm status [device-profile]
+    # Show running state, PID, uptime, ADB port, and image sizes.
+    # Checks all profiles when no argument is given.
+
 android-vm reset [device-profile]
     # Factory-reset userdata (delete + recreate the userdata volume).
 
