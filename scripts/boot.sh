@@ -213,9 +213,6 @@ qemu-system-x86_64 \
   -netdev "user,id=net0,hostfwd=tcp::${ADB_PORT}-:5555" \
   -device virtio-rng-pci \
   -bios "$OVMF_PATH" \
-  -append "root=/dev/vda androidboot.hardware=android_x86_64 \
-           androidboot.selinux=enforcing \
-           DATA=/dev/vdb" \
   -serial mon:stdio &
 
 QEMU_PID=$!
