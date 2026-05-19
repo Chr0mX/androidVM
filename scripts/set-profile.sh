@@ -72,25 +72,56 @@ else
 
   mkdir -p "$MNT_SYSTEM" "$MNT_VENDOR" "$MNT_PRODUCT"
 
+  VENDOR_MOUNTED=false
+  PRODUCT_MOUNTED=false
+
   cleanup() {
     log "Unmounting partitions ..."
-    sudo umount "$MNT_SYSTEM" "$MNT_VENDOR" "$MNT_PRODUCT" 2>/dev/null || true
+    $PRODUCT_MOUNTED && sudo umount "$MNT_PRODUCT" 2>/dev/null || true
+    $VENDOR_MOUNTED  && sudo umount "$MNT_VENDOR"  2>/dev/null || true
+    sudo umount "$MNT_SYSTEM" 2>/dev/null || true
     sudo qemu-nbd --disconnect /dev/nbd0 2>/dev/null || true
   }
   trap cleanup EXIT
 
+  log "Partition layout:"
+  lsblk /dev/nbd0
+
   sudo mount /dev/nbd0p2 "$MNT_SYSTEM"
-  sudo mount /dev/nbd0p5 "$MNT_VENDOR"
-  sudo mount /dev/nbd0p6 "$MNT_PRODUCT" || log "No product partition — skipping"
+
+  # Vendor: try separate partition first; fall back to system/vendor directory
+  if sudo mount /dev/nbd0p5 "$MNT_VENDOR" 2>/dev/null; then
+    VENDOR_MOUNTED=true
+    log "Vendor: mounted nbd0p5"
+  else
+    log "No separate vendor partition — using ${MNT_SYSTEM}/vendor"
+    MNT_VENDOR="${MNT_SYSTEM}/vendor"
+  fi
+
+  # Product: try separate partition; fall back to system/product directory, or skip
+  if sudo mount /dev/nbd0p6 "$MNT_PRODUCT" 2>/dev/null; then
+    PRODUCT_MOUNTED=true
+    log "Product: mounted nbd0p6"
+  elif [ -d "${MNT_SYSTEM}/product" ]; then
+    log "No separate product partition — using ${MNT_SYSTEM}/product"
+    MNT_PRODUCT="${MNT_SYSTEM}/product"
+  else
+    log "No product partition — skipping"
+    MNT_PRODUCT=""
+  fi
 
   # ── Patch props ──────────────────────────────────────────────────────────
   log "Patching system/build.prop ..."
   python3 "${SCRIPT_DIR}/lib/patch-props.py" \
     "$MNT_SYSTEM/build.prop" system "$PROFILE_FILE"
 
-  log "Patching vendor/build.prop ..."
-  python3 "${SCRIPT_DIR}/lib/patch-props.py" \
-    "$MNT_VENDOR/build.prop" vendor "$PROFILE_FILE"
+  if [ -f "$MNT_VENDOR/build.prop" ]; then
+    log "Patching vendor/build.prop ..."
+    python3 "${SCRIPT_DIR}/lib/patch-props.py" \
+      "$MNT_VENDOR/build.prop" vendor "$PROFILE_FILE"
+  else
+    log "WARNING: vendor/build.prop not found at ${MNT_VENDOR}/build.prop"
+  fi
 
   if [ -f "$MNT_VENDOR/default.prop" ]; then
     log "Patching vendor/default.prop ..."
@@ -98,7 +129,7 @@ else
       "$MNT_VENDOR/default.prop" vendor "$PROFILE_FILE"
   fi
 
-  if [ -f "$MNT_PRODUCT/build.prop" ]; then
+  if [ -n "$MNT_PRODUCT" ] && [ -f "$MNT_PRODUCT/build.prop" ]; then
     log "Patching product/build.prop ..."
     python3 "${SCRIPT_DIR}/lib/patch-props.py" \
       "$MNT_PRODUCT/build.prop" product "$PROFILE_FILE"
