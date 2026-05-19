@@ -178,7 +178,10 @@ else
     sudo sed -i 's/ DATA= / DATA=\/dev\/vdb /g' "$GRUB_CFG"
     sudo sed -i 's/ DATA=$/ DATA=\/dev\/vdb/' "$GRUB_CFG"
     # HWComposer + Gralloc HAL for virtio-gpu display stack (required for SurfaceFlinger)
-    sudo sed -i '/linux \/kernel/{ /HWC=/! s/$/ HWC=drm_minigbm GRALLOC=minigbm_arcvm/; }' "$GRUB_CFG"
+    # minigbm (not minigbm_arcvm) works without a virgl/GL host context — compatible with VNC
+    sudo sed -i '/linux \/kernel/{ /HWC=/! s/$/ HWC=drm_minigbm GRALLOC=minigbm/; }' "$GRUB_CFG"
+    # Hide kernel VT cursor so VNC shows blank screen instead of blinking '_' while Android boots
+    sudo sed -i '/linux \/kernel/{ /vt.global_cursor_default/! s/$/ vt.global_cursor_default=0/; }' "$GRUB_CFG"
     # Add serial console so kernel/init messages are visible in serial log
     sudo sed -i '/linux \/kernel/{ /console=ttyS0/! s/$/ console=ttyS0,115200n8/; }' "$GRUB_CFG"
     log "GRUB config after patching:"

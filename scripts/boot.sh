@@ -213,12 +213,15 @@ qemu-system-x86_64 \
   -smp "cores=${CPU_CORES},threads=${CPU_THREADS}" \
   -m "${RAM_MB}" \
   "${HUGEPAGES_FLAGS[@]}" \
-  -machine q35 \
+  -machine q35,vmport=off \
   -drive "file=${IMG},if=virtio,index=0,${IMG_SNAPSHOT}" \
   -drive "file=${UDATA},if=virtio,index=1,snapshot=off" \
   "${GPU_FLAGS[@]}" \
   "${DISPLAY_FLAGS[@]}" \
   "${AUDIO_FLAGS[@]}" \
+  -device virtio-tablet \
+  -device virtio-keyboard \
+  -device qemu-xhci,id=xhci \
   -device virtio-net-pci,netdev=net0 \
   -netdev "user,id=net0,hostfwd=tcp::${ADB_PORT}-:5555" \
   -device virtio-rng-pci \
