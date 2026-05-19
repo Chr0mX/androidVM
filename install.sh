@@ -301,36 +301,23 @@ else
     fi
     bash scripts/build-intermediate.sh
   else
-    DOWNLOAD_OK=false
     if [ -f "scripts/lib/fetch-release.sh" ]; then
       log "Downloading intermediate image via GitHub Releases (split-archive aware, resumable)..."
       OWNER_REPO=$(echo "$REPO_URL" \
         | sed 's|.*github\.com[:/]\(.*\)\.git$|\1|; s|.*github\.com[:/]\(.*\)|\1|')
-      if ROOT="${WORKSPACE_DIR}" bash scripts/lib/fetch-release.sh \
-          "$OWNER_REPO" "blissos14-gapps-arm.qcow2*" "intermediate/" \
-          --tag-prefix "bliss14-base-"; then
-        DOWNLOAD_OK=true
-      else
-        warn "No bliss14 GitHub Release found — trying direct URL fallback"
-        if curl -fsSL --head "${BASE_IMAGE_RELEASE}/blissos14-gapps-arm.qcow2" &>/dev/null; then
-          curl -L --retry 5 --retry-delay 10 --progress-bar \
-            "${BASE_IMAGE_RELEASE}/blissos14-gapps-arm.qcow2" \
-            -o "${INTERMEDIATE}.tmp" \
-            && mv "${INTERMEDIATE}.tmp" "$INTERMEDIATE" \
-            && DOWNLOAD_OK=true \
-            || rm -f "${INTERMEDIATE}.tmp"
-        fi
-      fi
-    fi
-
-    if ! $DOWNLOAD_OK || [ ! -f "$INTERMEDIATE" ]; then
-      warn "No pre-built release image available — building intermediate locally from ISO"
-      log "This will download ~1.5 GB and take 30–90 minutes depending on your hardware"
-      if [ ! -d "arm-trans/libndk_translation" ]; then
-        log "Fetching ARM translation libs..."
-        bash scripts/lib/fetch-arm-trans.sh arm-trans/
-      fi
-      bash scripts/lib/fetch-distro.sh bliss14
+      ROOT="${WORKSPACE_DIR}" bash scripts/lib/fetch-release.sh \
+        "$OWNER_REPO" "blissos14-gapps-arm.qcow2*" "intermediate/" \
+        --tag-prefix "bliss14-base-" \
+        || die "No bliss14 release found on GitHub. Trigger the CI workflow first:
+  https://github.com/${OWNER_REPO}/actions/workflows/build-base.yml
+  Then re-run the installer once the release is published."
+    else
+      log "Downloading pre-built intermediate image from GitHub Releases..."
+      curl -L --retry 5 --retry-delay 10 --progress-bar \
+           "${BASE_IMAGE_RELEASE}/blissos14-gapps-arm.qcow2" \
+           -o "${INTERMEDIATE}.tmp" \
+        || die "Download failed. Check https://github.com/Chr0mX/androidVM/releases for available images."
+      mv "${INTERMEDIATE}.tmp" "$INTERMEDIATE"
     fi
 
     [ -f "$INTERMEDIATE" ] && ok "Intermediate image ready ($(du -sh "$INTERMEDIATE" | cut -f1))"
