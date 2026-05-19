@@ -148,7 +148,7 @@ Three-layer qcow2 backing chain — only the final layer stores diffs per profil
 ```
 android11-base.qcow2           (raw source, never modified)
        ↓ backing-file
-android11-gapps-arm.qcow2      (+ GApps + ARM trans, built once)
+blissos14-gapps-arm.qcow2      (+ GApps + ARM trans, built once)
        ↓ backing-file
 android11-<profile>.qcow2      (+ identity props, one per profile)
 ```

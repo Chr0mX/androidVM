@@ -28,7 +28,7 @@ for arg in "$@"; do
 done
 
 PROFILE_FILE="${ROOT}/profiles/${PROFILE_NAME}.json"
-INTERMEDIATE="${ROOT}/intermediate/android11-gapps-arm.qcow2"
+INTERMEDIATE="${ROOT}/intermediate/blissos14-gapps-arm.qcow2"
 OUT_IMG="${ROOT}/builds/android11-${PROFILE_NAME}-$(date +%Y%m%d).qcow2"
 LATEST_LINK="${ROOT}/builds/android11-${PROFILE_NAME}-latest.qcow2"
 

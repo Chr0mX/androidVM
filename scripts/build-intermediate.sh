@@ -16,7 +16,7 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SOURCE_IMG="${ROOT}/base/android11-base.qcow2"
 GAPPS_ZIP="${ROOT}/gapps/mindthegapps.zip"
 ARM_TRANS_DIR="${ROOT}/arm-trans/libndk_translation"
-OUT_IMG="${ROOT}/intermediate/android11-gapps-arm.qcow2"
+OUT_IMG="${ROOT}/intermediate/blissos14-gapps-arm.qcow2"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --source) SOURCE_IMG="$2"; shift 2 ;;

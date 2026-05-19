@@ -278,7 +278,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 phase "Base image"
 
-INTERMEDIATE="intermediate/android11-gapps-arm.qcow2"
+INTERMEDIATE="intermediate/blissos14-gapps-arm.qcow2"
 
 if [ -f "$INTERMEDIATE" ]; then
   ok "Intermediate image already present — skipping download"
@@ -303,7 +303,7 @@ else
         || {
           warn "GitHub API download failed — falling back to direct URL"
           curl -L --retry 5 --retry-delay 10 --progress-bar \
-            "${BASE_IMAGE_RELEASE}/android11-gapps-arm.qcow2" \
+            "${BASE_IMAGE_RELEASE}/blissos14-gapps-arm.qcow2" \
             -o "${INTERMEDIATE}.tmp"
           mv "${INTERMEDIATE}.tmp" "$INTERMEDIATE"
         }
@@ -311,10 +311,10 @@ else
       log "Downloading pre-built intermediate image from GitHub Releases..."
       curl -L --retry 5 --retry-delay 10 \
            --progress-bar \
-           "${BASE_IMAGE_RELEASE}/android11-gapps-arm.qcow2" \
+           "${BASE_IMAGE_RELEASE}/blissos14-gapps-arm.qcow2" \
            -o "${INTERMEDIATE}.tmp"
 
-      if curl -fsSL "${BASE_IMAGE_RELEASE}/android11-gapps-arm.qcow2.sha256" \
+      if curl -fsSL "${BASE_IMAGE_RELEASE}/blissos14-gapps-arm.qcow2.sha256" \
                -o /tmp/image.sha256 2>/dev/null; then
         log "Verifying checksum..."
         EXPECTED=$(awk '{print $1}' /tmp/image.sha256)
