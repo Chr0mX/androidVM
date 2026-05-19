@@ -227,5 +227,15 @@ qemu-system-x86_64 \
 
 QEMU_PID=$!
 echo "$QEMU_PID" > "$PID_FILE"
-wait "$QEMU_PID" || true
-rm -f "$PID_FILE"
+
+if $VNC_MODE || $SPICE_MODE || $HEADLESS; then
+  # Return terminal immediately; background subshell cleans up PID file on exit
+  ( wait "$QEMU_PID" 2>/dev/null; rm -f "$PID_FILE" ) &
+  disown
+  echo "[boot] VM running in background (PID ${QEMU_PID})"
+  echo "[boot] Stop with: android-vm stop ${PROFILE_NAME}"
+else
+  # Interactive: terminal is attached to QEMU monitor — block until VM exits
+  wait "$QEMU_PID" || true
+  rm -f "$PID_FILE"
+fi
