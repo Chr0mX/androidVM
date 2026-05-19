@@ -139,8 +139,8 @@ if $SPICE_MODE; then
   GPU_FLAGS=()   # SPICE manages its own rendering
 elif $VNC_MODE; then
   VNC_PORT=$(( 5900 + VNC_DISPLAY ))
-  DISPLAY_FLAGS=(-display none -vnc ":${VNC_DISPLAY}")
-  GPU_FLAGS=()   # VNC uses software rendering
+  DISPLAY_FLAGS=(-display none -vnc ":${VNC_DISPLAY}" -vga std)
+  GPU_FLAGS=()   # VNC uses standard VGA framebuffer
   echo "[boot] VNC:         vnc://localhost:${VNC_PORT}  (display :${VNC_DISPLAY})"
 elif $HEADLESS; then
   DISPLAY_FLAGS=(-display none)
