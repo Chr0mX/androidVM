@@ -169,13 +169,18 @@ else
       "${PRODUCT_DIR}/build.prop" product "$PROFILE_FILE"
   fi
 
-  # ── Patch GRUB config for userdata partition ──────────────────────────────
+  # ── Patch GRUB config ─────────────────────────────────────────────────────
   # grub.cfg lives on the Android data partition (p2), not inside system.img
   GRUB_CFG="${MNT_ANDROID}/boot/grub/grub.cfg"
   if [ -f "$GRUB_CFG" ]; then
-    log "Patching GRUB config: DATA=/dev/vdb ..."
+    log "Patching GRUB config: DATA=/dev/vdb + console=ttyS0 ..."
+    # Set userdata partition (handles both "DATA= " and "DATA=<eol>" forms)
     sudo sed -i 's/ DATA= / DATA=\/dev\/vdb /g' "$GRUB_CFG"
     sudo sed -i 's/ DATA=$/ DATA=\/dev\/vdb/' "$GRUB_CFG"
+    # Add serial console so kernel/init messages are visible in serial log
+    sudo sed -i '/linux \/kernel/s/$/ console=ttyS0,115200n8/' "$GRUB_CFG"
+    log "GRUB config after patching:"
+    sudo grep 'linux ' "$GRUB_CFG" | head -5
   else
     log "WARNING: GRUB config not found at ${GRUB_CFG} — userdata partition may not mount"
   fi
