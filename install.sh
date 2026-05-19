@@ -82,7 +82,6 @@ STARTER_PROFILE="${ANDROID_VM_PROFILE:-pixel6a-bp1a}"
 DO_BOOT="${ANDROID_VM_BOOT:+true}"; DO_BOOT="${DO_BOOT:-false}"
 SKIP_VERIFY="${ANDROID_VM_SKIP_VFY:+true}"; SKIP_VERIFY="${SKIP_VERIFY:-false}"
 NO_DOWNLOAD="${ANDROID_VM_NO_DL:+true}"; NO_DOWNLOAD="${NO_DOWNLOAD:-false}"
-BASE_IMAGE_RELEASE="https://github.com/Chr0mX/androidVM/releases/latest/download"
 MIN_DISK_GB=25
 MIN_RAM_GB=6
 
@@ -281,47 +280,50 @@ if [ -f "${WORKSPACE_DIR}/android-vm" ]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHASE 4 — Fetch or build the intermediate base image
+# PHASE 4 — Fetch intermediate base images from GitHub Releases
 # ─────────────────────────────────────────────────────────────────────────────
-phase "Base image"
+phase "Base images"
 
-INTERMEDIATE="intermediate/blissos14-gapps-arm.qcow2"
+OWNER_REPO=$(echo "$REPO_URL" \
+  | sed 's|.*github\.com[:/]\(.*\)\.git$|\1|; s|.*github\.com[:/]\(.*\)|\1|')
+BLISS_INTERMEDIATE="intermediate/blissos14-gapps-arm.qcow2"
 
-if [ -f "$INTERMEDIATE" ]; then
-  ok "Intermediate image already present — skipping download"
-else
-  if $NO_DOWNLOAD; then
-    log "--no-download set — building intermediate from scratch"
-    log "This will take 30–90 minutes depending on your hardware"
-    [ -f "gapps/mindthegapps.zip" ] \
-      || die "GApps zip missing at gapps/mindthegapps.zip — place it there first"
-    if [ ! -d "arm-trans/libndk_translation" ]; then
-      log "Fetching ARM translation libs..."
-      bash scripts/lib/fetch-arm-trans.sh arm-trans/
-    fi
-    bash scripts/build-intermediate.sh
-  else
-    if [ -f "scripts/lib/fetch-release.sh" ]; then
-      log "Downloading intermediate image via GitHub Releases (split-archive aware, resumable)..."
-      OWNER_REPO=$(echo "$REPO_URL" \
-        | sed 's|.*github\.com[:/]\(.*\)\.git$|\1|; s|.*github\.com[:/]\(.*\)|\1|')
-      ROOT="${WORKSPACE_DIR}" bash scripts/lib/fetch-release.sh \
-        "$OWNER_REPO" "blissos14-gapps-arm.qcow2*" "intermediate/" \
-        --tag-prefix "bliss14-base-" \
-        || die "No bliss14 release found on GitHub. Trigger the CI workflow first:
-  https://github.com/${OWNER_REPO}/actions/workflows/build-base.yml
-  Then re-run the installer once the release is published."
-    else
-      log "Downloading pre-built intermediate image from GitHub Releases..."
-      curl -L --retry 5 --retry-delay 10 --progress-bar \
-           "${BASE_IMAGE_RELEASE}/blissos14-gapps-arm.qcow2" \
-           -o "${INTERMEDIATE}.tmp" \
-        || die "Download failed. Check https://github.com/Chr0mX/androidVM/releases for available images."
-      mv "${INTERMEDIATE}.tmp" "$INTERMEDIATE"
-    fi
-
-    [ -f "$INTERMEDIATE" ] && ok "Intermediate image ready ($(du -sh "$INTERMEDIATE" | cut -f1))"
+if $NO_DOWNLOAD; then
+  log "--no-download: building bliss14 intermediate locally (~30–90 min)"
+  if [ ! -d "arm-trans/libndk_translation" ]; then
+    log "Fetching ARM translation libs..."
+    bash scripts/lib/fetch-arm-trans.sh arm-trans/
   fi
+  bash scripts/lib/fetch-distro.sh bliss14
+else
+  MISSING=0
+  for distro_cfg in androiddistro/*.json; do
+    [ -f "$distro_cfg" ] || continue
+    slug=$(      jq -r '.slug'       "$distro_cfg") || continue
+    base_image=$(jq -r '.base_image' "$distro_cfg") || continue
+    dest="intermediate/${base_image}"
+
+    if [ -f "$dest" ]; then
+      ok "${slug}: already present ($(du -sh "$dest" | cut -f1))"
+      continue
+    fi
+
+    log "Downloading ${slug}: ${base_image} ..."
+    if ROOT="${WORKSPACE_DIR}" bash scripts/lib/fetch-release.sh \
+        "$OWNER_REPO" "${base_image}*" "intermediate/" \
+        --tag-prefix "${slug}-base-"; then
+      ok "${slug}: ready ($(du -sh "$dest" | cut -f1))"
+    else
+      warn "${slug}: no GitHub Release found — skipping"
+      warn "  Publish via CI: https://github.com/${OWNER_REPO}/actions/workflows/build-base.yml"
+      MISSING=$(( MISSING + 1 ))
+    fi
+  done
+
+  # bliss14 is required for the default profile build in Phase 6
+  [ -f "$BLISS_INTERMEDIATE" ] \
+    || die "bliss14 intermediate missing. Publish a CI release or set GITHUB_TOKEN if rate limited:
+  https://github.com/${OWNER_REPO}/actions/workflows/build-base.yml"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
