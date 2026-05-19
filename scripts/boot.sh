@@ -148,6 +148,16 @@ else
   DISPLAY_FLAGS=(-display "$DISPLAY_CFG")
 fi
 
+# ── Serial / monitor flags ────────────────────────────────────────────────────
+mkdir -p "${ROOT}/logs"
+if $VNC_MODE || $SPICE_MODE; then
+  SERIAL_LOG="${ROOT}/logs/${PROFILE_NAME}-serial.log"
+  SERIAL_FLAGS=(-serial "file:${SERIAL_LOG}")
+  echo "[boot] Serial log: ${SERIAL_LOG}"
+else
+  SERIAL_FLAGS=(-serial mon:stdio)
+fi
+
 # ── Audio flags ───────────────────────────────────────────────────────────────
 AUDIO_FLAGS=()
 if [ "$AUDIO" = "pa" ] && ! $SPICE_MODE && ! $HEADLESS; then
@@ -213,7 +223,7 @@ qemu-system-x86_64 \
   -netdev "user,id=net0,hostfwd=tcp::${ADB_PORT}-:5555" \
   -device virtio-rng-pci \
   -bios "$OVMF_PATH" \
-  -serial mon:stdio &
+  "${SERIAL_FLAGS[@]}" &
 
 QEMU_PID=$!
 echo "$QEMU_PID" > "$PID_FILE"
