@@ -1,4 +1,4 @@
-name: Build Android 11 Base Image
+name: Build Android 11 Base Images
 
 on:
   push:
@@ -6,6 +6,7 @@ on:
     paths:
       - 'gapps/**'
       - 'arm-trans/**'
+      - 'androiddistro/**'
       - 'scripts/lib/inject-gapps.sh'
       - 'scripts/lib/inject-arm-trans.sh'
       - 'scripts/build-intermediate.sh'
@@ -15,20 +16,28 @@ on:
     - cron: '0 2 1 * *'
   workflow_dispatch:
     inputs:
+      build_bliss14:
+        description: 'Build BlissOS 14 (blissos14-gapps-arm.qcow2)'
+        type: boolean
+        default: true
+      build_sakura:
+        description: 'Build Project Sakura FOSS (sakura-foss.qcow2)'
+        type: boolean
+        default: true
       force_rebuild:
         description: 'Force full rebuild even if cache is valid'
         type: boolean
         default: false
       source_img_url:
-        description: 'Override Bliss OS ISO URL (leave blank to auto-resolve latest from SourceForge)'
+        description: 'Override source ISO URL for the selected distro (leave blank to auto-resolve)'
         type: string
         default: ''
       gapps_url:
-        description: 'Override GApps download URL (leave blank for default)'
+        description: 'Override GApps URL for BlissOS (leave blank for default)'
         type: string
         default: ''
       run_smoke_test:
-        description: 'Run full VM boot smoke test (requires self-hosted KVM runner)'
+        description: 'Run full VM boot smoke test — bliss14 only (requires self-hosted KVM runner)'
         type: boolean
         default: false
 
@@ -41,57 +50,26 @@ permissions:
   contents: write   # required to create GitHub releases and upload assets
 
 env:
-  BLISSOS_SF_PATH: "Official/BlissOS14/FOSS/Generic"
-  SOURCE_IMG_SHA256: ""   # set to a sha256 hex string to pin and verify a specific release
   # OpenGApps pico x86_64 for Android 11 — last build before the project froze
   GAPPS_URL_DEFAULT: "https://sourceforge.net/projects/opengapps/files/x86_64/20220503/open_gapps-x86_64-11.0-pico-20220503.zip/download"
   GAPPS_SHA256: ""
   ARM_TRANS_COMMIT: "9324a8914b649b885dad6f2bfd14a67e5d1520bf"
-  OUTPUT_IMAGE: "blissos14-gapps-arm.qcow2"
-  # Increment BUILD_VERSION whenever build logic changes (layout detection,
-  # injection paths, etc.) to invalidate the cache and force a fresh build.
-  BUILD_VERSION: "2"
+  # Increment BUILD_VERSION whenever build logic changes to invalidate all caches.
+  BUILD_VERSION: "3"
 
 jobs:
-  # ─── Job 1: validate inputs, compute cache key ───────────────────────────
+  # ─── Job 1: compute distro matrix ────────────────────────────────────────
   preflight:
-    name: Preflight checks
+    name: Preflight
     runs-on: ubuntu-22.04
     outputs:
-      cache_key:          ${{ steps.key.outputs.cache_key }}
-      gapps_url:          ${{ steps.urls.outputs.gapps_url }}
-      source_img_url:     ${{ steps.source.outputs.source_img_url }}
-      source_img_filename: ${{ steps.source.outputs.source_img_filename }}
+      matrix:    ${{ steps.matrix.outputs.matrix }}
+      gapps_url: ${{ steps.gapps.outputs.gapps_url }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve Bliss OS ISO URL
-        id: source
-        run: |
-          if [ -n "${{ inputs.source_img_url }}" ]; then
-            # Manual override supplied via workflow_dispatch
-            url="${{ inputs.source_img_url }}"
-            # Derive filename from URL (last path component before /download)
-            filename=$(basename "$(dirname "$url")")
-            echo "source_img_url=${url}" >> $GITHUB_OUTPUT
-            echo "source_img_filename=${filename}" >> $GITHUB_OUTPUT
-            echo "Using manually provided URL: ${url}"
-          else
-            # Dynamically resolve the latest ISO from SourceForge
-            output=$(python3 scripts/lib/resolve-blissos-url.py \
-              --path "${{ env.BLISSOS_SF_PATH }}" \
-              --filter ".iso")
-            url=$(echo "$output" | grep '^url=' | cut -d= -f2-)
-            filename=$(echo "$output" | grep '^filename=' | cut -d= -f2-)
-            [ -n "$url" ] || { echo "::error::resolve-blissos-url.py returned no URL"; exit 1; }
-            echo "source_img_url=${url}" >> $GITHUB_OUTPUT
-            echo "source_img_filename=${filename}" >> $GITHUB_OUTPUT
-            echo "Resolved latest Bliss OS ISO: ${filename}"
-            echo "Download URL: ${url}"
-          fi
-
       - name: Resolve GApps URL
-        id: urls
+        id: gapps
         run: |
           if [ -n "${{ inputs.gapps_url }}" ]; then
             echo "gapps_url=${{ inputs.gapps_url }}" >> $GITHUB_OUTPUT
@@ -99,62 +77,95 @@ jobs:
             echo "gapps_url=${{ env.GAPPS_URL_DEFAULT }}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Compute cache key
-        id: key
+      - name: Build distro matrix
+        id: matrix
         run: |
-          # Cache key is a hash of every input that affects the output image.
-          # A cache hit means we can skip the multi-hour build and reuse the
-          # previously uploaded artifact.
-          hash=$(echo -n \
-            "${{ steps.source.outputs.source_img_filename }}" \
-            "${{ env.SOURCE_IMG_SHA256 }}" \
-            "${{ steps.urls.outputs.gapps_url }}" \
-            "${{ env.ARM_TRANS_COMMIT }}" \
-            "${{ env.BUILD_VERSION }}" \
-            "$(sha256sum scripts/lib/inject-gapps.sh scripts/lib/inject-arm-trans.sh \
-               | awk '{print $1}' | tr -d '\n')" \
-            | sha256sum | awk '{print $1}' | cut -c1-16)
-          echo "cache_key=base-image-${hash}" >> $GITHUB_OUTPUT
+          # On push/schedule build all distros; on workflow_dispatch respect the checkboxes
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            do_bliss14="${{ inputs.build_bliss14 }}"
+            do_sakura="${{ inputs.build_sakura }}"
+          else
+            do_bliss14="true"
+            do_sakura="true"
+          fi
 
-      - name: Validate all profile schemas
+          includes='[]'
+
+          add_distro() {
+            local slug="$1"
+            local cfg="androiddistro/${slug}.json"
+            local base_image inject_gapps source_url source_filename cache_key source_type
+
+            base_image=$(  jq -r '.base_image'            "$cfg")
+            inject_gapps=$(jq -r '.inject_gapps // true'  "$cfg")
+            source_type=$( jq -r '.source.type'           "$cfg")
+            source_url=$(  jq -r '.source.url      // ""' "$cfg")
+            source_filename=$(jq -r '.source.filename // ""' "$cfg")
+
+            # BlissOS: resolve latest ISO filename from SourceForge for stable cache key
+            if [ "$source_type" = "sourceforge_latest" ]; then
+              sf_path=$(jq -r '.source.sf_path'   "$cfg")
+              sf_filter=$(jq -r '.source.sf_filter' "$cfg")
+              resolver_out=$(python3 scripts/lib/resolve-blissos-url.py \
+                --path "$sf_path" --filter "$sf_filter" \
+                2>/dev/null || echo "url=\nfilename=bliss14-unknown.iso")
+              source_url=$(     echo "$resolver_out" | grep '^url='      | cut -d= -f2-)
+              source_filename=$(echo "$resolver_out" | grep '^filename=' | cut -d= -f2-)
+            fi
+
+            cache_key="base-image-${slug}-$(printf '%s' \
+              "${slug} ${source_filename} ${{ env.ARM_TRANS_COMMIT }} ${{ env.BUILD_VERSION }}" \
+              | sha256sum | awk '{print $1}' | cut -c1-16)"
+
+            entry=$(jq -n \
+              --arg distro          "$slug" \
+              --arg base_image      "$base_image" \
+              --arg inject_gapps    "$inject_gapps" \
+              --arg cache_key       "$cache_key" \
+              --arg source_url      "$source_url" \
+              --arg source_filename "$source_filename" \
+              '{distro:$distro, base_image:$base_image, inject_gapps:$inject_gapps,
+                cache_key:$cache_key, source_url:$source_url, source_filename:$source_filename}')
+            includes=$(echo "$includes" | jq ". + [$entry]")
+          }
+
+          [ "$do_bliss14" = "true" ] && add_distro bliss14
+          [ "$do_sakura"  = "true" ] && add_distro sakura
+
+          matrix=$(echo "$includes" | jq -c '{include: .}')
+          echo "matrix=${matrix}" >> $GITHUB_OUTPUT
+          echo "Distro matrix:"
+          echo "$matrix" | jq .
+
+      - name: Validate distro configs
         run: |
-          pip install jsonschema --quiet
+          for f in androiddistro/*.json; do
+            echo "Validating $f ..."
+            jq empty "$f" || { echo "::error::Invalid JSON: $f"; exit 1; }
+          done
+
+      - name: Validate device profile schemas
+        run: |
+          pip3 install jsonschema --quiet
           for f in profiles/*.json; do
             [ "$(basename "$f")" = "schema.json" ] && continue
             echo "Validating $f"
             python3 scripts/lib/profile-validator.py "$f"
           done
 
-  # ─── Job 2: check if a valid cached image already exists ─────────────────
-  check-cache:
-    name: Check image cache
-    needs: preflight
-    runs-on: ubuntu-22.04
-    outputs:
-      cache_hit: ${{ steps.cache.outputs.cache-hit }}
-    steps:
-      - name: Check cache
-        id: cache
-        uses: actions/cache/restore@v4
-        with:
-          path: image-cache/
-          key: ${{ needs.preflight.outputs.cache_key }}
-          lookup-only: true
-
-  # ─── Job 3: build the intermediate image ─────────────────────────────────
+  # ─── Job 2: build (one run per distro via matrix) ─────────────────────────
   #
   # Runs on standard GitHub-hosted ubuntu-22.04 runners. KVM is NOT required
   # here — the image is built via offline NBD mount + file injection, which is
   # pure userspace. If /dev/kvm happens to be present the step logs it, but
   # the build never tries to boot the VM.
-  #
-  # Note on performance: without KVM, QEMU TCG would be slow — but this job
-  # never boots QEMU. qemu-nbd and qemu-img are host tools only. Runtime is
-  # dominated by download speeds and rsync, not emulation.
   build:
-    name: Build intermediate image
-    needs: [preflight, check-cache]
-    if: needs.check-cache.outputs.cache_hit != 'true' || inputs.force_rebuild == true
+    name: Build ${{ matrix.distro }}
+    needs: preflight
+    if: needs.preflight.outputs.matrix != '{"include":[]}'
+    strategy:
+      matrix: ${{ fromJson(needs.preflight.outputs.matrix) }}
+      fail-fast: false
     runs-on: ubuntu-22.04
     timeout-minutes: 180
     outputs:
@@ -163,19 +174,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Detect execution environment
-        id: env_detect
+      # ── Cache lookup ────────────────────────────────────────────────────────
+      - name: Check cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: image-cache/
+          key: ${{ matrix.cache_key }}
+          lookup-only: true
+
+      - name: Determine build needed
+        id: plan
         run: |
-          if [ -e /dev/kvm ]; then
-            echo "kvm=true" >> $GITHUB_OUTPUT
-            echo "KVM available — hardware acceleration present"
+          if [ "${{ steps.cache.outputs.cache-hit }}" = "true" ] \
+             && [ "${{ inputs.force_rebuild }}" != "true" ]; then
+            echo "build=false" >> $GITHUB_OUTPUT
+            echo "::notice::Cache hit for ${{ matrix.distro }} — skipping build, will re-publish release"
           else
-            echo "kvm=false" >> $GITHUB_OUTPUT
-            echo "::notice::KVM not available on this runner. Build uses offline NBD" \
-                 "mount only and does not boot the VM, so this is fine."
+            echo "build=true" >> $GITHUB_OUTPUT
+            echo "Building ${{ matrix.distro }} from scratch"
           fi
 
+      # ── Build path ─────────────────────────────────────────────────────────
       - name: Install build dependencies
+        if: steps.plan.outputs.build == 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
@@ -186,53 +208,38 @@ jobs:
             grub-efi-amd64-bin parted
           pip3 install jsonschema --quiet
 
-      # ── Download & verify Bliss OS source ISO ─────────────────────────
-      - name: Cache source image download
+      - name: Detect execution environment
+        if: steps.plan.outputs.build == 'true'
+        run: |
+          [ -e /dev/kvm ] \
+            && echo "KVM available — hardware acceleration present" \
+            || echo "::notice::KVM not available — build uses offline NBD mount only, this is fine"
+
+      # ── Source ISO ──────────────────────────────────────────────────────────
+      - name: Cache source ISO
+        if: steps.plan.outputs.build == 'true'
         uses: actions/cache@v4
         id: source-cache
         with:
           path: source-image/
-          key: source-img-${{ needs.preflight.outputs.source_img_filename }}
+          key: source-img-${{ matrix.source_filename }}
 
-      - name: Download Bliss OS ISO
-        if: steps.source-cache.outputs.cache-hit != 'true'
+      - name: Download source ISO
+        if: steps.plan.outputs.build == 'true' && steps.source-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p source-image
-
-          if [ -n "${{ inputs.source_img_url }}" ]; then
-            ISO_URL="${{ inputs.source_img_url }}"
-            ISO_NAME=$(basename "$(dirname "$ISO_URL")")
-            echo "Using manually provided URL: ${ISO_URL}"
-          else
-            # Resolve the latest Bliss OS 14 FOSS ISO from SourceForge
-            resolver_out=$(python3 scripts/lib/resolve-blissos-url.py \
-              --path "${{ env.BLISSOS_SF_PATH }}" \
-              --filter ".iso")
-            ISO_URL=$(echo "$resolver_out" | grep '^url='      | cut -d= -f2-)
-            ISO_NAME=$(echo "$resolver_out" | grep '^filename=' | cut -d= -f2-)
-            [ -n "$ISO_URL" ] \
-              || { echo "::error::resolve-blissos-url.py returned no URL"; exit 1; }
-            echo "Resolved latest Bliss OS ISO: ${ISO_NAME}"
-            echo "Download URL: ${ISO_URL}"
-          fi
-
-          curl -L --retry 5 --retry-delay 10 \
-            "${ISO_URL}" \
-            -o source-image/source.img
-
-          if [ -n "${{ env.SOURCE_IMG_SHA256 }}" ]; then
-            echo "${{ env.SOURCE_IMG_SHA256 }}  source-image/source.img" | sha256sum -c
-          else
-            echo "::warning::No SHA256 pinned for source image — skipping checksum"
-          fi
-
-          # Verify the download is actually an ISO, not an HTML redirect page
+          url="${{ matrix.source_url }}"
+          [ -n "${{ inputs.source_img_url }}" ] && url="${{ inputs.source_img_url }}"
+          echo "Downloading: $url"
+          curl -L --retry 5 --retry-delay 10 --retry-max-time 300 \
+            "$url" -o source-image/source.img
           file source-image/source.img
           file source-image/source.img | grep -qi "ISO 9660\|CD-ROM" \
-            || { echo "::error::Downloaded file is not an ISO — SourceForge may have served an HTML page. URL: ${ISO_URL}"; exit 1; }
+            || { echo "::error::Downloaded file is not an ISO — URL may have returned HTML. URL: ${url}"; exit 1; }
 
-      # ── Download & verify GApps ─────────────────────────────────────────
-      - name: Cache GApps download
+      # ── GApps (BlissOS 14 only — Sakura is FOSS) ───────────────────────────
+      - name: Cache GApps
+        if: steps.plan.outputs.build == 'true' && matrix.inject_gapps == 'true'
         uses: actions/cache@v4
         id: gapps-cache
         with:
@@ -240,7 +247,7 @@ jobs:
           key: gapps-${{ needs.preflight.outputs.gapps_url }}
 
       - name: Download GApps
-        if: steps.gapps-cache.outputs.cache-hit != 'true'
+        if: steps.plan.outputs.build == 'true' && matrix.inject_gapps == 'true' && steps.gapps-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p gapps
           curl -L --retry 5 --retry-delay 10 \
@@ -251,10 +258,11 @@ jobs:
           fi
           file gapps/gapps.zip
           file gapps/gapps.zip | grep -qi "Zip archive\|zip\|Java archive" \
-            || { echo "::error::Downloaded GApps file is not a zip — URL may have returned an HTML page"; exit 1; }
+            || { echo "::error::Downloaded GApps file is not a zip"; exit 1; }
 
-      # ── Download ARM translation libs ───────────────────────────────────
+      # ── ARM translation ────────────────────────────────────────────────────
       - name: Cache ARM translation
+        if: steps.plan.outputs.build == 'true'
         uses: actions/cache@v4
         id: armtrans-cache
         with:
@@ -262,37 +270,29 @@ jobs:
           key: arm-trans-${{ env.ARM_TRANS_COMMIT }}
 
       - name: Download ARM translation
-        if: steps.armtrans-cache.outputs.cache-hit != 'true'
-        run: |
-          bash scripts/lib/fetch-arm-trans.sh arm-trans/
+        if: steps.plan.outputs.build == 'true' && steps.armtrans-cache.outputs.cache-hit != 'true'
+        run: bash scripts/lib/fetch-arm-trans.sh arm-trans/
 
       # ── Extract partition images from ISO ──────────────────────────────────
-      # Bliss OS ISOs use SquashFS: partition images live inside system.sfs
-      # (and optionally vendor.sfs / product.sfs) rather than as bare .img
-      # files. Pipeline:
-      #   1. Loop-mount the ISO
-      #   2. unsquashfs each .sfs → extracts system.img (etc.) from within
-      #   3. Fall back to bare .img files if no .sfs present
+      # Bliss OS and Sakura ISOs use SquashFS: partition images live inside
+      # system.sfs (and optionally vendor.sfs / product.sfs).
+      # Pipeline: loop-mount ISO → unsquashfs each .sfs → extract .img files.
       - name: Extract partition images from ISO
+        if: steps.plan.outputs.build == 'true'
         run: |
           mkdir -p iso-mount work
           sudo mount -o loop,ro source-image/source.img iso-mount
-
           echo "=== ISO root contents ==="
           ls -la iso-mount/
-
           FOUND=0
-
           for name in system vendor product; do
             sfs="iso-mount/${name}.sfs"
             img_direct="iso-mount/${name}.img"
             img_subdir="iso-mount/${name}/${name}.img"
-
             if [ -f "$sfs" ]; then
               size=$(du -sh "$sfs" | cut -f1)
               echo "Unsquashing ${name}.sfs (${size}) ..."
               sudo unsquashfs -d "work/sfs-${name}" "$sfs"
-              # The .img may be at the squashfs root or one level in
               for inner in "work/sfs-${name}/${name}.img" \
                            "work/sfs-${name}/system.img" \
                            "work/sfs-${name}/${name}/${name}.img"; do
@@ -303,59 +303,45 @@ jobs:
                 fi
               done
               sudo rm -rf "work/sfs-${name}"
-
             elif [ -f "$img_direct" ]; then
               size=$(du -sh "$img_direct" | cut -f1)
               echo "Copying ${name}.img (${size}) ..."
               cp "$img_direct" "work/${name}.img"
               FOUND=$((FOUND+1))
-
             elif [ -f "$img_subdir" ]; then
-              size=$(du -sh "$img_subdir" | cut -f1)
-              echo "Copying ${name}/${name}.img (${size}) ..."
               cp "$img_subdir" "work/${name}.img"
               FOUND=$((FOUND+1))
             fi
           done
-
-          # Save boot files needed for final disk assembly
           for item in kernel initrd.img ramdisk.img isolinux grub efi; do
             [ -e "iso-mount/${item}" ] && cp -r "iso-mount/${item}" "work/boot-${item}" || true
           done
-
-          sudo umount iso-mount
-          rmdir iso-mount
-
+          sudo umount iso-mount && rmdir iso-mount
           [ "$FOUND" -gt 0 ] || { echo "::error::No partition images (.sfs or .img) found in ISO"; exit 1; }
-          echo "Extracted ${FOUND} partition image(s)"
-          ls -lh work/
+          echo "Extracted ${FOUND} partition image(s)"; ls -lh work/
 
       - name: Convert Android sparse images to raw ext4
+        if: steps.plan.outputs.build == 'true'
         run: |
           for name in system vendor product; do
-            src="work/${name}.img"
+            src="work/${name}.img"; dst="work/${name}.raw"
             [ -f "$src" ] || continue
-            dst="work/${name}.raw"
-            echo "Converting ${name}.img ..."
             simg2img "$src" "$dst" 2>/dev/null \
-              && echo "  sparse → raw" \
-              || { cp "$src" "$dst"; echo "  as-is (not sparse)"; }
-            rm -f "$src"
-            file "$dst"
+              && echo "$name: sparse → raw" \
+              || { cp "$src" "$dst"; echo "$name: as-is (not sparse)"; }
+            rm -f "$src"; file "$dst"
           done
 
       - name: Resize system image to accommodate GApps
+        if: steps.plan.outputs.build == 'true' && matrix.inject_gapps == 'true'
         run: |
-          # GApps adds ~400-500 MB; add 600 MB headroom before injection.
-          # truncate -s +600M grows the backing file; resize2fs with no size
-          # argument then expands the filesystem to fill the extra space.
           e2fsck -yf work/system.raw || true
           truncate -s +600M work/system.raw
           resize2fs work/system.raw
           e2fsck -yf work/system.raw || true
 
-      # ── Loop-mount raw images and inject ───────────────────────────────────
       - name: Mount partition images
+        if: steps.plan.outputs.build == 'true'
         run: |
           sudo mkdir -p mnt/system mnt/product
           sudo mount -o loop,rw work/system.raw mnt/system
@@ -363,38 +349,32 @@ jobs:
             || echo "No product partition — product injection skipped"
 
       - name: Detect system image layout
+        if: steps.plan.outputs.build == 'true'
         run: |
-          # Detect whether system.img is a bare system partition (build.prop and
-          # app/ live at the mount root) or a rootfs image (system files live one
-          # level deeper at mnt/system/system/). We use build.prop presence as the
-          # authoritative indicator because Android-x86 rootfs images contain a
-          # lightweight system/ subdirectory that would trigger a naive directory
-          # check even when the real system files are at the mount root.
           if [ -f "mnt/system/build.prop" ] || [ -d "mnt/system/app" ] || [ -d "mnt/system/lib" ]; then
             SYS="mnt/system"
-            echo "System-partition image detected — system files at ${SYS}/"
+            echo "System-partition image — system files at ${SYS}/"
           elif [ -f "mnt/system/system/build.prop" ] || [ -d "mnt/system/system/app" ]; then
             SYS="mnt/system/system"
-            echo "Rootfs image detected — system files at ${SYS}/"
+            echo "Rootfs image — system files at ${SYS}/"
           else
             SYS="mnt/system"
-            echo "Layout unknown — defaulting to system-partition layout at ${SYS}/"
+            echo "Layout unknown — defaulting to ${SYS}/"
           fi
-
           if [ -f work/vendor.raw ]; then
             sudo mkdir -p mnt/vendor
             sudo mount -o loop,rw work/vendor.raw mnt/vendor
-            VENDOR="${SYS}/vendor"
+            VENDOR="mnt/vendor"
           else
             VENDOR="${SYS}/vendor"
             sudo mkdir -p "$VENDOR"
           fi
-
-          echo "SYSTEM_MNT=${SYS}"   >> "$GITHUB_ENV"
+          echo "SYSTEM_MNT=${SYS}"    >> "$GITHUB_ENV"
           echo "VENDOR_MNT=${VENDOR}" >> "$GITHUB_ENV"
-          echo "Using SYSTEM_MNT=${SYS}, VENDOR_MNT=${VENDOR}"
+          echo "Layout: SYSTEM_MNT=${SYS}  VENDOR_MNT=${VENDOR}"
 
       - name: Inject GApps
+        if: steps.plan.outputs.build == 'true' && matrix.inject_gapps == 'true'
         run: |
           echo "=== GApps zip top-level structure ==="
           unzip -l gapps/gapps.zip | head -40
@@ -404,21 +384,21 @@ jobs:
             "${{ env.SYSTEM_MNT }}" \
             mnt/product
           echo "=== Post-injection GmsCore check ==="
-          # Bliss OS FOSS pre-installs GPlay as com.google.android.gms;
-          # OpenGApps installs PrebuiltGmsCore. Accept either.
           sudo test -d "${{ env.SYSTEM_MNT }}/priv-app/com.google.android.gms" \
             || sudo test -d "${{ env.SYSTEM_MNT }}/priv-app/PrebuiltGmsCore" \
             || sudo test -d "${{ env.SYSTEM_MNT }}/priv-app/GmsCore" \
-            || { echo "::error::No GmsCore package found in ${{ env.SYSTEM_MNT }}/priv-app/"; exit 1; }
+            || { echo "::error::No GmsCore package found after GApps injection"; exit 1; }
           echo "GmsCore confirmed."
 
       - name: Inject ARM translation
+        if: steps.plan.outputs.build == 'true'
         run: |
           sudo bash scripts/lib/inject-arm-trans.sh \
             arm-trans/libndk_translation \
             "${{ env.VENDOR_MNT }}"
 
       - name: Write ARM bridge props
+        if: steps.plan.outputs.build == 'true'
         run: |
           VPROP="${{ env.VENDOR_MNT }}/build.prop"
           sudo touch "$VPROP"
@@ -440,9 +420,10 @@ jobs:
             fi
           done
           echo "=== ARM bridge props ==="
-          sudo grep "ro\.dalvik\|ro\.enable\.native\|ro\.vendor\.enable\|ro\.ndk_translation\|abilist" "$VPROP"
+          sudo grep "ro\.dalvik\|ro\.enable\.native\|abilist" "$VPROP"
 
       - name: Restore SELinux file contexts
+        if: steps.plan.outputs.build == 'true'
         run: |
           if command -v restorecon &>/dev/null; then
             sudo restorecon -R -F "${{ env.SYSTEM_MNT }}/priv-app/" 2>/dev/null || true
@@ -452,230 +433,162 @@ jobs:
           fi
 
       - name: Unmount partition images
-        if: always()
+        if: always() && steps.plan.outputs.build == 'true'
         run: |
-          # Unmount separate vendor/product if they were mounted as loop devices
-          if [ -f work/vendor.raw ]; then
-            sudo umount mnt/vendor 2>/dev/null || true
-            sudo rmdir mnt/vendor 2>/dev/null || true
-          fi
+          [ -f work/vendor.raw ] && { sudo umount mnt/vendor 2>/dev/null || true; sudo rmdir mnt/vendor 2>/dev/null || true; }
           sudo umount mnt/product 2>/dev/null || true
           sudo umount mnt/system 2>/dev/null || true
           sudo rmdir mnt/product mnt/system 2>/dev/null || true
 
-      # ── Assemble bootable disk image ────────────────────────────────────────
-      # Creates a GPT disk with an EFI partition (GRUB) and an ext4 Android data
-      # partition containing the modified system.img, kernel, and ramdisk.
-      # Android x86 boots by having GRUB loop-mount system.img from the data partition.
+      # ── Assemble bootable disk image ─────────────────────────────────────────
+      # GPT: p1=EFI FAT32 (GRUB), p2=ext4 Android data (system.img + kernel).
+      # Android-x86 boots by having GRUB loop-mount system.img from the data
+      # partition. SRC= and DATA= are left empty here; set-profile.sh patches
+      # them per-device when building a profile image.
       - name: Assemble bootable disk image
+        if: steps.plan.outputs.build == 'true'
         run: |
           SYSTEM_SZ=$(stat -c%s work/system.raw)
           VENDOR_SZ=$([ -f work/vendor.raw  ] && stat -c%s work/vendor.raw  || echo 0)
           PRODUCT_SZ=$([ -f work/product.raw ] && stat -c%s work/product.raw || echo 0)
           BOOT_SZ=$(find work/ -maxdepth 1 -name 'boot-*' -exec du -sb {} + 2>/dev/null \
                     | awk '{s+=$1}END{print s+0}')
-
-          # EFI partition: 256 MB; data partition: content + 20% + 256 MB buffer
           DATA_CONTENT=$(( SYSTEM_SZ + VENDOR_SZ + PRODUCT_SZ + BOOT_SZ ))
           DATA_SZ=$(( DATA_CONTENT * 12 / 10 + 256 * 1024 * 1024 ))
           DISK_SZ=$(( DATA_SZ + 256 * 1024 * 1024 + 4 * 1024 * 1024 ))
           echo "Disk size: $(( DISK_SZ / 1024 / 1024 )) MB  (data $(( DATA_SZ / 1024 / 1024 )) MB)"
-
           truncate -s $DISK_SZ work/disk.raw
-
           sudo parted -s work/disk.raw \
             mklabel gpt \
             mkpart EFI  fat32 1MiB   257MiB \
             set 1 esp on \
             mkpart Data ext4  257MiB 100%
-
           LOOP=$(sudo losetup --find --show --partscan work/disk.raw)
           echo "Loop device: $LOOP"
           sleep 1
-
           sudo mkfs.fat -F32 -n EFI    "${LOOP}p1"
           sudo mkfs.ext4 -L Android    "${LOOP}p2"
-
           sudo mkdir -p mnt/efi mnt/android
           sudo mount "${LOOP}p1" mnt/efi
           sudo mount "${LOOP}p2" mnt/android
-
-          # Copy Android system files to data partition
           sudo cp work/system.raw  mnt/android/system.img
           [ -f work/vendor.raw  ] && sudo cp work/vendor.raw  mnt/android/vendor.img  || true
           [ -f work/product.raw ] && sudo cp work/product.raw mnt/android/product.img || true
           [ -f work/boot-kernel ]        && sudo cp work/boot-kernel        mnt/android/kernel       || true
           [ -f work/boot-ramdisk.img ]   && sudo cp work/boot-ramdisk.img   mnt/android/ramdisk.img  || true
           [ -f work/boot-initrd.img ]    && sudo cp work/boot-initrd.img    mnt/android/initrd.img   || true
-
-          # Install GRUB EFI
           sudo grub-install \
             --target=x86_64-efi \
             --efi-directory=mnt/efi \
             --boot-directory=mnt/android/boot \
             --removable \
             --no-nvram
-
-          # GRUB config — Android x86 standard kernel cmdline
           sudo mkdir -p mnt/android/boot/grub
-          sudo tee mnt/android/boot/grub/grub.cfg > /dev/null << 'GRUBCFG'
+          DISTRO_NAME=$(jq -r '.name' androiddistro/${{ matrix.distro }}.json)
+          sudo tee mnt/android/boot/grub/grub.cfg > /dev/null << GRUBCFG
           set default=0
           set timeout=3
 
-          menuentry "Bliss OS 14" {
+          menuentry "${DISTRO_NAME}" {
             search --set=root --label Android
             linux /kernel root=/dev/ram0 androidboot.hardware=android_x86_64 androidboot.selinux=permissive SRC= DATA=
             initrd /initrd.img
           }
           GRUBCFG
-
           sudo umount mnt/efi mnt/android
           sudo rmdir  mnt/efi mnt/android
           sudo losetup -d "$LOOP"
 
-      # ── Convert to qcow2 and checksum ───────────────────────────────────────
       - name: Convert disk image to qcow2
+        if: steps.plan.outputs.build == 'true'
         run: |
           mkdir -p image-cache
           qemu-img convert -O qcow2 -c \
             work/disk.raw \
-            image-cache/${{ env.OUTPUT_IMAGE }}
-          qemu-img info image-cache/${{ env.OUTPUT_IMAGE }}
+            "image-cache/${{ matrix.base_image }}"
+          qemu-img info "image-cache/${{ matrix.base_image }}"
 
-      - name: Record checksums
+      - name: Record checksum
+        if: steps.plan.outputs.build == 'true'
         run: |
           cd image-cache
-          sha256sum ${{ env.OUTPUT_IMAGE }} > ${{ env.OUTPUT_IMAGE }}.sha256
-          cat ${{ env.OUTPUT_IMAGE }}.sha256
+          sha256sum "${{ matrix.base_image }}" > "${{ matrix.base_image }}.sha256"
+          cat "${{ matrix.base_image }}.sha256"
 
-      # ── Cache for future runs ───────────────────────────────────────────
       - name: Save image to cache
+        if: steps.plan.outputs.build == 'true'
         uses: actions/cache/save@v4
         with:
           path: image-cache/
-          key: ${{ needs.preflight.outputs.cache_key }}
+          key: ${{ matrix.cache_key }}
 
-      # ── Split if image exceeds GitHub's 2 GB per-asset limit ────────────
-      # Cache is saved first (unsplit) so validate-artifact can qemu-img check
-      # the whole file. Split parts are only used for the release upload.
+      # ── Cache-hit path: restore without rebuilding ─────────────────────────
+      - name: Restore from cache (hit)
+        if: steps.plan.outputs.build == 'false'
+        uses: actions/cache/restore@v4
+        with:
+          path: image-cache/
+          key: ${{ matrix.cache_key }}
+
+      # ── Release upload (always, build or cache) ────────────────────────────
       - name: Split large image for release upload
         id: split
         run: |
-          SIZE=$(stat -c%s image-cache/${{ env.OUTPUT_IMAGE }})
+          SIZE=$(stat -c%s "image-cache/${{ matrix.base_image }}")
           echo "Image size: $(( SIZE / 1024 / 1024 )) MB"
           if [ "$SIZE" -gt 1990000000 ]; then
-            echo "Splitting into 1.9 GB parts for GitHub release upload..."
+            echo "Splitting into 1.9 GB parts..."
             split -b 1900M \
-              "image-cache/${{ env.OUTPUT_IMAGE }}" \
-              "image-cache/${{ env.OUTPUT_IMAGE }}.part-"
-            rm "image-cache/${{ env.OUTPUT_IMAGE }}"
-            ls -lh image-cache/${{ env.OUTPUT_IMAGE }}.part-*
+              "image-cache/${{ matrix.base_image }}" \
+              "image-cache/${{ matrix.base_image }}.part-"
+            rm "image-cache/${{ matrix.base_image }}"
+            ls -lh "image-cache/${{ matrix.base_image }}.part-"*
             echo "split=true" >> $GITHUB_OUTPUT
           else
-            echo "No split needed"
             echo "split=false" >> $GITHUB_OUTPUT
           fi
 
-      # ── Upload as GitHub Release artifact ───────────────────────────────
       - name: Create release tag
         id: tag
-        run: echo "tag=base-$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
+        run: echo "tag=${{ matrix.distro }}-base-$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
-          name: "Base image ${{ steps.tag.outputs.tag }}"
+          name: "${{ matrix.distro }} base image ${{ steps.tag.outputs.tag }}"
           body: |
-            Intermediate base image with GApps + ARM translation pre-baked.
+            Intermediate base image for **${{ matrix.distro }}** with ARM translation pre-baked.
 
-            - ARM translation: libndk_translation (commit ${{ env.ARM_TRANS_COMMIT }})
-            - GApps: OpenGApps pico x86_64 11.0
+            | Field | Value |
+            |---|---|
+            | Distro | `${{ matrix.distro }}` |
+            | Output | `${{ matrix.base_image }}` |
+            | ARM translation | commit `${{ env.ARM_TRANS_COMMIT }}` |
+            | GApps | ${{ matrix.inject_gapps == 'true' && 'OpenGApps pico x86_64 11.0' || 'none (FOSS build)' }} |
+            | Source | `${{ matrix.source_filename }}` |
 
-            Verify before use:
+            **Verify before use:**
             ```
-            sha256sum -c ${{ env.OUTPUT_IMAGE }}.sha256
+            sha256sum -c ${{ matrix.base_image }}.sha256
             ```
 
-            If the image was split (`.part-aa`, `.part-ab` …), reassemble first:
+            If split (`.part-aa`, `.part-ab` …), reassemble first:
             ```
-            cat ${{ env.OUTPUT_IMAGE }}.part-* > ${{ env.OUTPUT_IMAGE }}
+            cat ${{ matrix.base_image }}.part-* > ${{ matrix.base_image }}
             ```
-          files: |
-            image-cache/${{ env.OUTPUT_IMAGE }}*
+          files: image-cache/${{ matrix.base_image }}*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ─── Job 4: restore cache hit (no build needed) ───────────────────────
-  restore-from-cache:
-    name: Restore cached image
-    needs: [preflight, check-cache]
-    if: needs.check-cache.outputs.cache_hit == 'true' && inputs.force_rebuild != true
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Restore from cache
-        uses: actions/cache/restore@v4
-        with:
-          path: image-cache/
-          key: ${{ needs.preflight.outputs.cache_key }}
-      - name: Confirm
-        run: |
-          echo "Cache hit — skipping build"
-          ls -lh image-cache/
-
-      - name: Split large image for release upload
-        run: |
-          SIZE=$(stat -c%s image-cache/${{ env.OUTPUT_IMAGE }})
-          echo "Image size: $(( SIZE / 1024 / 1024 )) MB"
-          if [ "$SIZE" -gt 1990000000 ]; then
-            echo "Splitting into 1.9 GB parts for GitHub release upload..."
-            split -b 1900M \
-              "image-cache/${{ env.OUTPUT_IMAGE }}" \
-              "image-cache/${{ env.OUTPUT_IMAGE }}.part-"
-            rm "image-cache/${{ env.OUTPUT_IMAGE }}"
-            ls -lh image-cache/${{ env.OUTPUT_IMAGE }}.part-*
-          else
-            echo "No split needed"
-          fi
-
-      - name: Create release tag
-        id: tag
-        run: echo "tag=base-$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
-
-      - name: Upload cached image to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: "Base image ${{ steps.tag.outputs.tag }} (cached)"
-          body: |
-            Cache hit — image content unchanged from previous build.
-
-            - ARM translation: libndk_translation (commit ${{ env.ARM_TRANS_COMMIT }})
-            - GApps: OpenGApps pico x86_64 11.0
-
-            Verify before use:
-            ```
-            sha256sum -c ${{ env.OUTPUT_IMAGE }}.sha256
-            ```
-
-            If the image was split (`.part-aa`, `.part-ab` …), reassemble first:
-            ```
-            cat ${{ env.OUTPUT_IMAGE }}.part-* > ${{ env.OUTPUT_IMAGE }}
-            ```
-          files: |
-            image-cache/${{ env.OUTPUT_IMAGE }}*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # ─── Job 5: static artifact validation (no KVM needed) ───────────────
-  #
-  # Runs on GitHub-hosted runners. Mounts the built image via NBD and spot-
-  # checks that key files were injected correctly. Catches injection failures
-  # without requiring a live VM boot.
+  # ─── Job 3: static artifact validation ───────────────────────────────────
   validate-artifact:
-    name: Validate artifact (static)
-    needs: [preflight, build, restore-from-cache]
-    if: always() && (needs.build.result == 'success' || needs['restore-from-cache'].result == 'success')
+    name: Validate ${{ matrix.distro }}
+    needs: [preflight, build]
+    if: always() && needs.build.result == 'success'
+    strategy:
+      matrix: ${{ fromJson(needs.preflight.outputs.matrix) }}
+      fail-fast: false
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
@@ -687,29 +600,26 @@ jobs:
           sudo apt-get install -y --no-install-recommends qemu-utils python3 jq
           pip3 install jsonschema --quiet
 
-      - name: Restore built image from cache
+      - name: Restore image from cache
         uses: actions/cache/restore@v4
         with:
           path: image-cache/
-          key: ${{ needs.preflight.outputs.cache_key }}
+          key: ${{ matrix.cache_key }}
 
       - name: Verify image integrity
         run: |
           echo "=== qemu-img check ==="
-          qemu-img check image-cache/${{ env.OUTPUT_IMAGE }}
+          qemu-img check "image-cache/${{ matrix.base_image }}"
           echo "=== Image info ==="
-          qemu-img info image-cache/${{ env.OUTPUT_IMAGE }}
+          qemu-img info  "image-cache/${{ matrix.base_image }}"
           echo "=== Checksum ==="
-          cd image-cache && sha256sum -c ${{ env.OUTPUT_IMAGE }}.sha256
+          cd image-cache && sha256sum -c "${{ matrix.base_image }}.sha256"
 
       - name: Mount and spot-check injected files
         run: |
-          # Disk layout: GPT p1=EFI (FAT32), p2=Android data (ext4).
-          # system.img lives on p2 and is loop-mounted. vendor.img may not
-          # exist (Bliss OS embeds vendor inside system.img at /vendor).
           sudo modprobe nbd max_part=8
           sleep 1
-          sudo qemu-nbd --connect=/dev/nbd0 image-cache/${{ env.OUTPUT_IMAGE }}
+          sudo qemu-nbd --connect=/dev/nbd0 "image-cache/${{ matrix.base_image }}"
           sleep 2
           sudo partprobe /dev/nbd0
           sleep 1
@@ -719,30 +629,23 @@ jobs:
 
           sudo mkdir -p mnt/android mnt/system
           sudo mount /dev/nbd0p2 mnt/android
-
           [ -f mnt/android/system.img ] \
             && sudo mount -o loop,ro mnt/android/system.img mnt/system \
             || { echo "::error::system.img not found on data partition"; exit 1; }
 
-          # Detect rootfs vs system-partition image (same logic as build job)
           if [ -f "mnt/system/build.prop" ] || [ -d "mnt/system/app" ] || [ -d "mnt/system/lib" ]; then
             SYS="mnt/system"
-            echo "System-partition image — system files at ${SYS}/"
           elif [ -f "mnt/system/system/build.prop" ] || [ -d "mnt/system/system/app" ]; then
             SYS="mnt/system/system"
-            echo "Rootfs image — system files at ${SYS}/"
           else
             SYS="mnt/system"
-            echo "Layout unknown — defaulting to ${SYS}/"
           fi
 
-          # vendor: separate image or directory inside system
           HAS_VENDOR_IMG=false
           if [ -f mnt/android/vendor.img ]; then
             sudo mkdir -p mnt/vendor
             sudo mount -o loop,ro mnt/android/vendor.img mnt/vendor
             HAS_VENDOR_IMG=true
-            VENDOR="${SYS}/vendor_img"   # just a label; real mount is mnt/vendor
             VENDOR_CHECK="mnt/vendor"
           else
             VENDOR_CHECK="${SYS}/vendor"
@@ -750,7 +653,7 @@ jobs:
 
           FAIL=0
           check_file() {
-            if [ -e "$1" ]; then
+            if sudo test -e "$1"; then
               echo "  ✓ $1"
             else
               echo "  ✗ MISSING: $1"
@@ -758,27 +661,25 @@ jobs:
             fi
           }
 
-          echo "=== GApps presence ==="
-          # Accept any of the known GmsCore directory names:
-          #   com.google.android.gms  — Bliss OS FOSS pre-installs GPlay under this name
-          #   PrebuiltGmsCore         — OpenGApps injection canonical APK name
-          #   GmsCore                 — MindTheGapps / older OpenGApps
-          gmscore_found=false
-          for gms_dir in com.google.android.gms PrebuiltGmsCore GmsCore; do
-            if sudo test -d "${SYS}/priv-app/${gms_dir}"; then
-              echo "  ✓ GmsCore found at priv-app/${gms_dir}"
-              gmscore_found=true
-              break
+          # GApps check — only for distros with inject_gapps=true
+          if [ "${{ matrix.inject_gapps }}" = "true" ]; then
+            echo "=== GApps presence ==="
+            gmscore_found=false
+            for gms_dir in com.google.android.gms PrebuiltGmsCore GmsCore; do
+              if sudo test -d "${SYS}/priv-app/${gms_dir}"; then
+                echo "  ✓ GmsCore found at priv-app/${gms_dir}"
+                gmscore_found=true
+                break
+              fi
+            done
+            $gmscore_found || { echo "  ✗ MISSING: GmsCore"; FAIL=$((FAIL+1)); }
+            if sudo test -f "${SYS}/etc/permissions/privapp-permissions-google.xml"; then
+              echo "  ✓ privapp-permissions-google.xml"
+            else
+              echo "  ⚠ privapp-permissions-google.xml absent (may be granted via ROM config)"
             fi
-          done
-          $gmscore_found || { echo "  ✗ MISSING: GmsCore (checked com.google.android.gms, PrebuiltGmsCore, GmsCore)"; FAIL=$((FAIL+1)); }
-          # privapp-permissions-google.xml is an Android 9+ mechanism. The OpenGApps
-          # package predates this; Bliss OS FOSS ships GmsCore with its own ROM-level
-          # permission grants. Warn if absent but don't fail.
-          if sudo test -f "${SYS}/etc/permissions/privapp-permissions-google.xml"; then
-            echo "  ✓ privapp-permissions-google.xml"
           else
-            echo "  ⚠ privapp-permissions-google.xml absent (ROM may grant permissions via product or build-time config)"
+            echo "=== GApps: FOSS build (${{ matrix.distro }}) — skipping GmsCore check ==="
           fi
 
           echo "=== ARM translation presence ==="
@@ -787,7 +688,7 @@ jobs:
 
           echo "=== ARM bridge props ==="
           VPROP="${VENDOR_CHECK}/build.prop"
-          if [ -f "$VPROP" ] && sudo grep -q "ro.dalvik.vm.native.bridge=libndk_translation.so" "$VPROP"; then
+          if sudo test -f "$VPROP" && sudo grep -q "ro.dalvik.vm.native.bridge=libndk_translation.so" "$VPROP"; then
             echo "  ✓ ro.dalvik.vm.native.bridge present"
           else
             echo "  ✗ ro.dalvik.vm.native.bridge missing from ${VPROP}"
@@ -800,21 +701,18 @@ jobs:
           sudo rmdir mnt/vendor mnt/system mnt/android 2>/dev/null || true
 
           if [ "$FAIL" -gt 0 ]; then
-            echo "::error::$FAIL static check(s) failed"
+            echo "::error::${FAIL} static check(s) failed for ${{ matrix.distro }}"
             exit 1
           fi
-          echo "All static checks passed"
+          echo "All static checks passed for ${{ matrix.distro }}"
 
-  # ─── Job 6: full VM boot smoke test (optional, KVM only) ─────────────
+  # ─── Job 4: full VM boot smoke test (optional, KVM only, bliss14) ─────────
   #
   # Only runs when explicitly requested via workflow_dispatch with
   # run_smoke_test=true AND a self-hosted KVM runner is available.
-  # Never runs on push/schedule — it is not part of the default CI path.
-  #
-  # Software emulation (TCG) would take hours to boot Android and is not
-  # a viable fallback here. If no KVM runner is available, skip this job.
+  # Targets bliss14 — the tested and known-booting distro.
   smoke-test:
-    name: Smoke test (KVM boot)
+    name: Smoke test (KVM boot — bliss14)
     needs: [preflight, build]
     if: inputs.run_smoke_test == true && needs.build.result == 'success'
     runs-on: [self-hosted, linux, kvm]
@@ -832,13 +730,22 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends android-tools-adb qemu-utils
 
-      - name: Download built image from release
+      - name: Get bliss14 cache key from matrix
+        id: bliss14
         run: |
-          gh release download "${{ needs.build.outputs.release_tag }}" \
-            --pattern "${{ env.OUTPUT_IMAGE }}" \
-            --dir image-cache/
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          key=$(echo '${{ needs.preflight.outputs.matrix }}' \
+            | jq -r '.include[] | select(.distro=="bliss14") | .cache_key')
+          base=$(echo '${{ needs.preflight.outputs.matrix }}' \
+            | jq -r '.include[] | select(.distro=="bliss14") | .base_image')
+          [ -n "$key" ]  || { echo "::error::bliss14 not in this build's matrix"; exit 1; }
+          echo "cache_key=${key}"   >> $GITHUB_OUTPUT
+          echo "base_image=${base}" >> $GITHUB_OUTPUT
+
+      - name: Restore bliss14 image from cache
+        uses: actions/cache/restore@v4
+        with:
+          path: image-cache/
+          key: ${{ steps.bliss14.outputs.cache_key }}
 
       - name: Create throw-away userdata volume
         run: qemu-img create -f qcow2 userdata-test.qcow2 4G
@@ -849,12 +756,15 @@ jobs:
             -enable-kvm \
             -smp 2 -m 2048 \
             -cpu host \
-            -machine q35 \
-            -drive file=image-cache/${{ env.OUTPUT_IMAGE }},if=virtio,index=0 \
-            -drive file=userdata-test.qcow2,if=virtio,index=1 \
+            -machine q35,vmport=off \
+            -drive "file=image-cache/${{ steps.bliss14.outputs.base_image }},if=virtio,index=0" \
+            -drive "file=userdata-test.qcow2,if=virtio,index=1" \
             -device virtio-net-pci,netdev=net0 \
             -netdev user,id=net0,hostfwd=tcp::5555-:5555 \
-            -display none \
+            -device virtio-tablet \
+            -device virtio-keyboard \
+            -device qemu-xhci,id=xhci \
+            -display none -vga std \
             -daemonize \
             -pidfile /tmp/qemu.pid
           echo "VM started, waiting 30s for ADB..."

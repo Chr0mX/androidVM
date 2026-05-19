@@ -4,11 +4,12 @@
   "android_version": 11,
   "arch": "x86_64",
   "base_image": "blissos14-gapps-arm.qcow2",
+  "inject_gapps": true,
 
   "source": {
-    "type": "github_release",
-    "repo": "Chr0mX/androidVM",
-    "asset_pattern": "blissos14-gapps-arm.qcow2*"
+    "type": "sourceforge_latest",
+    "sf_path": "Official/BlissOS14/FOSS/Generic",
+    "sf_filter": ".iso"
   },
 
   "grub": {

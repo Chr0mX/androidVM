@@ -5,6 +5,8 @@
   "arch": "x86_64",
   "base_image": "sakura-foss.qcow2",
 
+  "inject_gapps": false,
+
   "source": {
     "type": "direct",
     "url": "https://sourceforge.net/projects/projectsakura/files/x86_64/ProjectSakura-5.2-FOSS-20220427-1210--OFFICIAL.iso/download",
