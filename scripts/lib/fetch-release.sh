@@ -45,7 +45,9 @@ api_get() {
   [ -n "${GITHUB_TOKEN:-}" ] && auth_header=(-H "Authorization: token ${GITHUB_TOKEN}")
 
   local http_code
-  http_code=$(curl -fsSL -w "%{http_code}" "${auth_header[@]}" \
+  # Omit -f so curl always writes the response body and the http_code -w output
+  # regardless of HTTP status — we check the code ourselves below.
+  http_code=$(curl -sSL -w "%{http_code}" "${auth_header[@]}" \
     -H "Accept: application/vnd.github.v3+json" \
     "$url" -o /tmp/fetch-release-api.json 2>/dev/null; echo)
   http_code="${http_code: -3}"
@@ -53,6 +55,9 @@ api_get() {
   if [ "$http_code" = "403" ] || [ "$http_code" = "429" ]; then
     warn "GitHub API rate limited (HTTP ${http_code})."
     warn "Set GITHUB_TOKEN env var to increase limit: export GITHUB_TOKEN=<token>"
+    local api_msg
+    api_msg=$(jq -r '.message // empty' /tmp/fetch-release-api.json 2>/dev/null || true)
+    [ -n "$api_msg" ] && warn "GitHub says: ${api_msg}"
     return 1
   fi
   if [ "$http_code" != "200" ]; then
@@ -119,6 +124,14 @@ fi
 
 # When --tag-prefix is set the API returned an array; pick the first matching release
 if [ -n "$TAG_PREFIX" ]; then
+  RESP_TYPE=$(echo "$RELEASE_JSON" | jq -r 'type' 2>/dev/null || echo "invalid")
+  if [ "$RESP_TYPE" != "array" ]; then
+    API_MSG=$(echo "$RELEASE_JSON" | jq -r '.message // empty' 2>/dev/null || true)
+    [ -n "$API_MSG" ] && warn "GitHub API message: ${API_MSG}"
+    warn "Expected a JSON array from the releases endpoint, got: ${RESP_TYPE}"
+    warn "If rate limited, set GITHUB_TOKEN: export GITHUB_TOKEN=<your-token>"
+    die "Cannot list releases for ${OWNER_REPO}"
+  fi
   RELEASE_JSON=$(echo "$RELEASE_JSON" \
     | jq --arg p "$TAG_PREFIX" 'map(select(.tag_name | startswith($p))) | first // empty')
   if [ -z "$RELEASE_JSON" ] || [ "$RELEASE_JSON" = "null" ]; then
