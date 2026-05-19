@@ -101,6 +101,90 @@ matches_pattern() {
   esac
 }
 
+# ── Atom feed fallback — no API auth required, no rate limit ──────────────────
+# Used automatically when the GitHub REST API is unavailable or rate-limited.
+# Parses the public releases Atom feed to discover the latest tag, then
+# downloads assets directly (whole file or split parts) without any API call.
+fetch_via_atom() {
+  local prefix="$1" file_glob="$2" dest_dir="$3"
+  local file_base="${file_glob//\*/}"   # blissos14-gapps-arm.qcow2* → blissos14-gapps-arm.qcow2
+
+  log "GitHub API unavailable — using Atom feed fallback (no token needed)"
+
+  local tag
+  tag=$(curl -fsSL "https://github.com/${OWNER_REPO}/releases.atom" 2>/dev/null \
+    | grep -o "releases/tag/${prefix}[^\"<]*" | head -1 | sed 's|releases/tag/||') || true
+
+  if [ -z "$tag" ]; then
+    warn "Atom feed: no release found for prefix '${prefix}'"
+    return 1
+  fi
+  log "Atom feed: latest tag = ${tag}"
+
+  local base_url="https://github.com/${OWNER_REPO}/releases/download/${tag}"
+  local dest_file="${dest_dir}/${file_base}"
+
+  # Idempotency
+  if [ -f "$dest_file" ]; then
+    log "${file_base} already present — skipping"
+    return 0
+  fi
+
+  # Try whole file first; fall through to split parts on failure
+  if curl -fsSL -L --retry 3 --retry-delay 10 --progress-bar \
+      "${base_url}/${file_base}" -o "${dest_file}.tmp" 2>/dev/null; then
+    mv "${dest_file}.tmp" "$dest_file"
+  else
+    rm -f "${dest_file}.tmp"
+    log "Whole-file download failed — trying split parts"
+
+    local parts=() part part_dest
+    local -a alpha=(a b c d e f g h i j k l m n o p q r s t u v w x y z)
+    for a in "${alpha[@]}"; do
+      for b in "${alpha[@]}"; do
+        part="${file_base}.part-${a}${b}"
+        part_dest="${CACHE_DIR}/${part}"
+        if curl -fsSL -L --retry 3 --retry-delay 10 --progress-bar \
+            "${base_url}/${part}" -o "${part_dest}.tmp" 2>/dev/null; then
+          mv "${part_dest}.tmp" "$part_dest"
+          parts+=("$part")
+          log "Downloaded part: ${part}"
+        else
+          rm -f "${part_dest}.tmp"
+          break 2
+        fi
+      done
+    done
+
+    if [ ${#parts[@]} -eq 0 ]; then
+      warn "No files or split parts found at ${base_url}/"
+      return 1
+    fi
+
+    log "Reassembling ${#parts[@]} parts → ${file_base}"
+    local part_files=()
+    for p in "${parts[@]}"; do part_files+=("${CACHE_DIR}/${p}"); done
+    cat "${part_files[@]}" > "${dest_file}.tmp"
+    mv "${dest_file}.tmp" "$dest_file"
+    rm -f "${part_files[@]}"
+    log "Parts removed from cache"
+  fi
+
+  # Verify checksum if sidecar exists
+  local sha_expected
+  if sha_expected=$(curl -fsSL "${base_url}/${file_base}.sha256" 2>/dev/null | awk '{print $1}') \
+      && [ -n "$sha_expected" ]; then
+    verify_sha256 "$dest_file" "$sha_expected" || {
+      rm -f "$dest_file"
+      die "Checksum mismatch — downloaded file removed"
+    }
+  else
+    warn "No .sha256 available for ${file_base} — skipping verification"
+  fi
+
+  log "Done: ${dest_file} ($(du -sh "$dest_file" | cut -f1))"
+}
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 if [ -n "$TAG_PREFIX" ]; then
   API_URL="https://api.github.com/repos/${OWNER_REPO}/releases?per_page=20"
@@ -112,13 +196,17 @@ fi
 
 RELEASE_JSON=""
 if ! RELEASE_JSON=$(api_get "$API_URL" 2>/dev/null); then
-  warn "GitHub API call failed — falling back to direct releases/latest/download URL"
-  # Derive base filename from pattern (strip globs)
+  if [ -n "$TAG_PREFIX" ]; then
+    # REST API failed (rate limit or network) — Atom feed has no such limits
+    fetch_via_atom "$TAG_PREFIX" "$PATTERN" "$DEST_DIR" && exit 0
+    die "Both GitHub API and Atom feed fallback failed for prefix '${TAG_PREFIX}'"
+  fi
+  # No tag prefix: try the classic direct-URL fallback
+  warn "GitHub API unavailable — trying direct download URL"
   BASE_NAME="${PATTERN//\*/}"
-  BASE_NAME="${BASE_NAME%%.*}"
-  FALLBACK_URL="https://github.com/${OWNER_REPO}/releases/latest/download/${BASE_NAME}.qcow2"
+  FALLBACK_URL="https://github.com/${OWNER_REPO}/releases/latest/download/${BASE_NAME}"
   log "Trying: ${FALLBACK_URL}"
-  download_file "$FALLBACK_URL" "${DEST_DIR}/$(basename "$FALLBACK_URL")"
+  download_file "$FALLBACK_URL" "${DEST_DIR}/${BASE_NAME}"
   exit 0
 fi
 
@@ -128,9 +216,9 @@ if [ -n "$TAG_PREFIX" ]; then
   if [ "$RESP_TYPE" != "array" ]; then
     API_MSG=$(echo "$RELEASE_JSON" | jq -r '.message // empty' 2>/dev/null || true)
     [ -n "$API_MSG" ] && warn "GitHub API message: ${API_MSG}"
-    warn "Expected a JSON array from the releases endpoint, got: ${RESP_TYPE}"
-    warn "If rate limited, set GITHUB_TOKEN: export GITHUB_TOKEN=<your-token>"
-    die "Cannot list releases for ${OWNER_REPO}"
+    warn "API returned '${RESP_TYPE}' instead of an array — trying Atom feed fallback"
+    fetch_via_atom "$TAG_PREFIX" "$PATTERN" "$DEST_DIR" && exit 0
+    die "Cannot fetch release for prefix '${TAG_PREFIX}' from ${OWNER_REPO}"
   fi
   RELEASE_JSON=$(echo "$RELEASE_JSON" \
     | jq --arg p "$TAG_PREFIX" 'map(select(.tag_name | startswith($p))) | first // empty')
