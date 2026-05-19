@@ -138,12 +138,13 @@ pip3 install jsonschema
 workspace/
 ├── android-vm              # Unified CLI (symlinked to /usr/local/bin)
 ├── install.sh              # One-liner installer
+├── androiddistro/          # Per-distro build config (bliss14.json, sakura.json, …)
 ├── base/                   # Master read-only image — never boot directly
 ├── intermediate/           # GApps + ARM trans baked in, still read-only
 ├── builds/                 # Final per-profile artifacts  ← boot these
 ├── userdata/               # Per-profile userdata volumes (8 GB each)
-├── run/                    # Runtime PID files (gitignored)
-├── cache/                  # Download cache for split archives (gitignored)
+├── run/                    # Runtime PID files
+├── cache/                  # Download cache (ISOs, split archive parts — gitignored)
 ├── config/
 │   ├── defaults.json           # Default VM and port settings
 │   ├── device-spoof.json       # Device identity spoofing settings
@@ -164,6 +165,7 @@ workspace/
 │   ├── verify.sh               # ADB-based verification
 │   └── lib/
 │       ├── detect-hardware.sh      # CPU/RAM/KVM detection helpers
+│       ├── fetch-distro.sh         # Download distro ISO + build intermediate qcow2
 │       ├── fetch-release.sh        # GitHub API downloader (split-archive aware)
 │       ├── patch-props.py          # Deterministic build.prop patcher
 │       ├── profile-validator.py    # JSON schema + consistency checks
@@ -214,11 +216,14 @@ ro.product.cpu.abilist=x86_64,x86,arm64-v8a,armeabi-v7a,armeabi
 ## Common Commands
 
 ```bash
-# Build intermediate image from scratch (30–90 min, run once)
-bash scripts/build-intermediate.sh
+# Download and build a distro's intermediate image (replaces build-intermediate.sh for new distros)
+bash scripts/lib/fetch-distro.sh bliss14          # BlissOS 14 (downloads from SourceForge)
+bash scripts/lib/fetch-distro.sh sakura           # Project Sakura FOSS
+bash scripts/lib/fetch-distro.sh bliss14 --force  # Force rebuild
 
-# Build a profile image
+# Build a profile image (specify distro with --distro, default: bliss14)
 bash scripts/set-profile.sh pixel6a-bp1a
+bash scripts/set-profile.sh pixel6a-bp1a --distro sakura --rebuild
 
 # Boot it
 bash scripts/boot.sh pixel6a-bp1a
@@ -235,6 +240,37 @@ bash scripts/set-profile.sh pixel7-ap1a --rebuild --boot --check
 # Reset userdata (factory wipe without rebuilding image)
 qemu-img create -f qcow2 userdata/userdata-pixel6a-bp1a.qcow2 8G
 ```
+
+## Multiple Distros
+
+The `androiddistro/` directory contains per-distro JSON configs that control the entire build pipeline. Two distros are included:
+
+| Slug | Name | GApps | Source | GRUB HWC/GRALLOC |
+|---|---|---|---|---|
+| `bliss14` | BlissOS 14 | ✓ OpenGApps pico | SourceForge (auto-latest) | `drm_minigbm` / `minigbm` |
+| `sakura` | Project Sakura 5.2 FOSS | ✗ (FOSS) | SourceForge (direct) | `drm` / `gbm` |
+
+```bash
+# Build a Project Sakura intermediate image locally
+bash scripts/lib/fetch-distro.sh sakura
+
+# Then build any profile against it
+bash scripts/set-profile.sh pixel6a-bp1a --distro sakura --rebuild
+bash scripts/boot.sh pixel6a-bp1a --vnc
+```
+
+The CI workflow (`build-base.yml`) builds both distros in parallel and publishes separate GitHub Releases tagged `bliss14-base-YYYYMMDD-HHMM` and `sakura-base-YYYYMMDD-HHMM`.
+
+### Device Identity Spoofing
+
+`config/device-spoof.json` controls the prop-patching behaviour of `set-profile.sh`:
+
+| Field | Default | Effect |
+|---|---|---|
+| `enabled` | `true` | Master toggle — set `false` to skip all prop patching |
+| `patch_partitions` | `["system","vendor","product"]` | Which partitions to patch |
+| `verify_after_build` | `false` | Auto-run `verify.sh` after every `set-profile.sh` build |
+| `leak_scan_tokens` | `["generic_x86",…]` | Tokens `verify.sh` searches for in `getprop` output |
 
 ## CI
 

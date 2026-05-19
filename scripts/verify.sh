@@ -48,7 +48,17 @@ fi
 
 echo ""
 echo "=== Leak scan ==="
-for token in "generic_x86" "emulator" "test-keys" "lineage" "waydroid"; do
+# Read tokens from config/device-spoof.json if available; fall back to built-in defaults
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPOOF_JSON="${SCRIPT_DIR}/../config/device-spoof.json"
+LEAK_TOKENS=()
+if [ -f "$SPOOF_JSON" ] && command -v jq &>/dev/null; then
+  mapfile -t LEAK_TOKENS < <(jq -r '.leak_scan_tokens[]? // empty' "$SPOOF_JSON")
+fi
+[ "${#LEAK_TOKENS[@]}" -eq 0 ] && \
+  LEAK_TOKENS=("generic_x86" "emulator" "test-keys" "lineage" "waydroid")
+
+for token in "${LEAK_TOKENS[@]}"; do
   if adb shell getprop 2>/dev/null | grep -qi "$token"; then
     printf "  \033[0;31m✗\033[0m LEAK: '%s' found in getprop output\n" "$token"
     FAIL=$((FAIL + 1))

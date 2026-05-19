@@ -47,6 +47,19 @@ MNT_PRODUCT="${ROOT}/mnt/product"
 log() { echo "[set-profile] $*"; }
 die() { echo "[set-profile] ERROR: $*" >&2; exit 1; }
 
+# ── Load device-spoof config (optional) ───────────────────────────────────────
+SPOOF_JSON="${ROOT}/config/device-spoof.json"
+SPOOF_ENABLED=true
+SPOOF_PARTITIONS=("system" "vendor" "product")
+VERIFY_AFTER_BUILD=false
+
+if [ -f "$SPOOF_JSON" ] && command -v jq &>/dev/null; then
+  SPOOF_ENABLED=$(jq -r '.enabled // true' "$SPOOF_JSON")
+  mapfile -t SPOOF_PARTITIONS < <(jq -r '.patch_partitions[]? // empty' "$SPOOF_JSON")
+  [ "${#SPOOF_PARTITIONS[@]}" -eq 0 ] && SPOOF_PARTITIONS=("system" "vendor" "product")
+  VERIFY_AFTER_BUILD=$(jq -r '.verify_after_build // false' "$SPOOF_JSON")
+fi
+
 # ── Load distro config ─────────────────────────────────────────────────────
 [ -f "$DISTRO_FILE" ] || die "Distro not found: $DISTRO_FILE"
 command -v jq &>/dev/null || die "jq is required but not installed"
@@ -161,28 +174,49 @@ else
   fi
 
   # ── Patch props (sudo required — files owned by root in mounted ext4) ────
-  log "Patching system/build.prop ..."
-  sudo python3 "${SCRIPT_DIR}/lib/patch-props.py" \
-    "${SYS_DIR}/build.prop" system "$PROFILE_FILE"
+  contains_partition() {
+    local needle="$1"; local item
+    for item in "${SPOOF_PARTITIONS[@]}"; do [ "$item" = "$needle" ] && return 0; done
+    return 1
+  }
 
-  if sudo test -f "${VENDOR_DIR}/build.prop"; then
-    log "Patching vendor/build.prop ..."
-    sudo python3 "${SCRIPT_DIR}/lib/patch-props.py" \
-      "${VENDOR_DIR}/build.prop" vendor "$PROFILE_FILE"
+  if [ "$SPOOF_ENABLED" = "true" ]; then
+    if contains_partition "system"; then
+      log "Patching system/build.prop ..."
+      sudo python3 "${SCRIPT_DIR}/lib/patch-props.py" \
+        "${SYS_DIR}/build.prop" system "$PROFILE_FILE"
+    else
+      log "Skipping system prop patching (device-spoof.json: patch_partitions)"
+    fi
+
+    if contains_partition "vendor"; then
+      if sudo test -f "${VENDOR_DIR}/build.prop"; then
+        log "Patching vendor/build.prop ..."
+        sudo python3 "${SCRIPT_DIR}/lib/patch-props.py" \
+          "${VENDOR_DIR}/build.prop" vendor "$PROFILE_FILE"
+      else
+        log "WARNING: vendor/build.prop not found at ${VENDOR_DIR}/build.prop"
+      fi
+      if sudo test -f "${VENDOR_DIR}/default.prop"; then
+        log "Patching vendor/default.prop ..."
+        sudo python3 "${SCRIPT_DIR}/lib/patch-props.py" \
+          "${VENDOR_DIR}/default.prop" vendor "$PROFILE_FILE"
+      fi
+    else
+      log "Skipping vendor prop patching (device-spoof.json: patch_partitions)"
+    fi
+
+    if contains_partition "product"; then
+      if [ -n "$PRODUCT_DIR" ] && sudo test -f "${PRODUCT_DIR}/build.prop"; then
+        log "Patching product/build.prop ..."
+        sudo python3 "${SCRIPT_DIR}/lib/patch-props.py" \
+          "${PRODUCT_DIR}/build.prop" product "$PROFILE_FILE"
+      fi
+    else
+      log "Skipping product prop patching (device-spoof.json: patch_partitions)"
+    fi
   else
-    log "WARNING: vendor/build.prop not found at ${VENDOR_DIR}/build.prop"
-  fi
-
-  if sudo test -f "${VENDOR_DIR}/default.prop"; then
-    log "Patching vendor/default.prop ..."
-    sudo python3 "${SCRIPT_DIR}/lib/patch-props.py" \
-      "${VENDOR_DIR}/default.prop" vendor "$PROFILE_FILE"
-  fi
-
-  if [ -n "$PRODUCT_DIR" ] && sudo test -f "${PRODUCT_DIR}/build.prop"; then
-    log "Patching product/build.prop ..."
-    sudo python3 "${SCRIPT_DIR}/lib/patch-props.py" \
-      "${PRODUCT_DIR}/build.prop" product "$PROFILE_FILE"
+    log "Device spoofing disabled (device-spoof.json: enabled=false) — skipping prop patching"
   fi
 
   # ── Patch GRUB config ─────────────────────────────────────────────────────
@@ -233,7 +267,10 @@ if $BOOT; then
 fi
 
 # ── Verify ─────────────────────────────────────────────────────────────────
-if $CHECK; then
+RUN_CHECK=$CHECK
+[ "$VERIFY_AFTER_BUILD" = "true" ] && RUN_CHECK=true
+
+if $RUN_CHECK; then
   log "Running verification ..."
   bash "${SCRIPT_DIR}/verify.sh" "$PROFILE_FILE"
 fi
