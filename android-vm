@@ -117,11 +117,22 @@ cmd_start() {
   device_profile=$(default_device_profile)
   vm_profile=$(default_vm_profile)
 
+  local extra_flags=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --vm-profile) vm_profile="$2"; shift 2 ;;
       --debug)      shift ;;
-      -*) die "Unknown flag for start: $1" ;;
+      # boot.sh flags — pass through
+      --spice|--headless|--no-kvm|--snapshot) extra_flags+=("$1"); shift ;;
+      --vnc)
+        extra_flags+=("$1")
+        if [[ $# -gt 1 && "$2" =~ ^[0-9]+$ ]]; then
+          extra_flags+=("$2"); shift 2
+        else
+          shift
+        fi
+        ;;
+      -*) die "Unknown flag for start: $1 (boot flags: --vnc, --spice, --headless, --no-kvm, --snapshot)" ;;
       *)  device_profile="$1"; shift ;;
     esac
   done
@@ -150,7 +161,7 @@ cmd_start() {
   fi
 
   log "Starting VM: device=${device_profile}  vm-profile=${vm_profile}"
-  bash "${ROOT}/scripts/boot.sh" "$device_profile" --vm-profile "$vm_profile"
+  bash "${ROOT}/scripts/boot.sh" "$device_profile" --vm-profile "$vm_profile" "${extra_flags[@]}"
 }
 
 # ── cmd_stop ──────────────────────────────────────────────────────────────────
