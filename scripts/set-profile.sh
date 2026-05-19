@@ -1,34 +1,37 @@
 #!/usr/bin/env bash
 # Create a per-profile bootable image by layering identity props onto the intermediate.
 #
-# Usage: set-profile.sh <profile-name> [--rebuild] [--boot] [--check]
+# Usage: set-profile.sh <profile-name> [--distro <name>] [--rebuild] [--boot] [--check]
 #
-#   --rebuild   Force recreation even if a same-day build already exists
-#   --boot      Launch the VM after building
-#   --check     Run verify.sh against the booted VM
+#   --distro <name>  Android distro to use (default: bliss14); matches androiddistro/<name>.json
+#   --rebuild        Force recreation even if a same-day build already exists
+#   --boot           Launch the VM after building
+#   --check          Run verify.sh against the booted VM
 set -euo pipefail
 IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-PROFILE_NAME="${1:?Usage: set-profile.sh <profile-name> [--rebuild] [--boot] [--check]}"
+PROFILE_NAME="${1:?Usage: set-profile.sh <profile-name> [--distro <name>] [--rebuild] [--boot] [--check]}"
+DISTRO_NAME="bliss14"
 REBUILD=false
 BOOT=false
 CHECK=false
 
 shift
-for arg in "$@"; do
-  case "$arg" in
-    --rebuild) REBUILD=true ;;
-    --boot)    BOOT=true    ;;
-    --check)   CHECK=true   ;;
-    *) echo "[set-profile] Unknown argument: $arg" >&2; exit 1 ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --distro)  DISTRO_NAME="${2:?--distro requires a name}"; shift 2 ;;
+    --rebuild) REBUILD=true;  shift ;;
+    --boot)    BOOT=true;     shift ;;
+    --check)   CHECK=true;    shift ;;
+    *) echo "[set-profile] Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
 
 PROFILE_FILE="${ROOT}/profiles/${PROFILE_NAME}.json"
-INTERMEDIATE="${ROOT}/intermediate/blissos14-gapps-arm.qcow2"
+DISTRO_FILE="${ROOT}/androiddistro/${DISTRO_NAME}.json"
 OUT_IMG="${ROOT}/builds/android11-${PROFILE_NAME}-$(date +%Y%m%d).qcow2"
 LATEST_LINK="${ROOT}/builds/android11-${PROFILE_NAME}-latest.qcow2"
 
@@ -43,6 +46,19 @@ MNT_PRODUCT="${ROOT}/mnt/product"
 
 log() { echo "[set-profile] $*"; }
 die() { echo "[set-profile] ERROR: $*" >&2; exit 1; }
+
+# ── Load distro config ─────────────────────────────────────────────────────
+[ -f "$DISTRO_FILE" ] || die "Distro not found: $DISTRO_FILE"
+command -v jq &>/dev/null || die "jq is required but not installed"
+
+DISTRO_BASE_IMAGE=$(jq -r '.base_image'    "$DISTRO_FILE")
+DISTRO_HWC=$(       jq -r '.grub.hwc'      "$DISTRO_FILE")
+DISTRO_GRALLOC=$(   jq -r '.grub.gralloc'  "$DISTRO_FILE")
+mapfile -t DISTRO_EXTRA_PARAMS < <(jq -r '.grub.extra_params[]?' "$DISTRO_FILE")
+
+INTERMEDIATE="${ROOT}/intermediate/${DISTRO_BASE_IMAGE}"
+
+log "Distro: $(jq -r '.name' "$DISTRO_FILE")  (HWC=${DISTRO_HWC}  GRALLOC=${DISTRO_GRALLOC})"
 
 # ── Preconditions ──────────────────────────────────────────────────────────
 [ -f "$PROFILE_FILE" ]  || die "Profile not found: $PROFILE_FILE"
@@ -103,7 +119,7 @@ else
     SYSTEM_IMG_MOUNTED=true
     log "Mounted system.img (loop)"
   else
-    die "system.img not found on data partition (${MNT_ANDROID}) — is this a valid BlissOS image?"
+    die "system.img not found on data partition (${MNT_ANDROID}) — is this a valid Android-x86 image? (distro: ${DISTRO_NAME})"
   fi
 
   # Detect system layout: system-partition image vs rootfs image
@@ -173,15 +189,17 @@ else
   # grub.cfg lives on the Android data partition (p2), not inside system.img
   GRUB_CFG="${MNT_ANDROID}/boot/grub/grub.cfg"
   if [ -f "$GRUB_CFG" ]; then
-    log "Patching GRUB config: DATA=/dev/vdb + HWC/GRALLOC + console=ttyS0 ..."
+    log "Patching GRUB config: DATA=/dev/vdb + HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC} + console=ttyS0 ..."
     # Set userdata partition (handles both "DATA= " and "DATA=<eol>" forms)
     sudo sed -i 's/ DATA= / DATA=\/dev\/vdb /g' "$GRUB_CFG"
     sudo sed -i 's/ DATA=$/ DATA=\/dev\/vdb/' "$GRUB_CFG"
-    # HWComposer + Gralloc HAL for virtio-gpu display stack (required for SurfaceFlinger)
-    # minigbm (not minigbm_arcvm) works without a virgl/GL host context — compatible with VNC
-    sudo sed -i '/linux \/kernel/{ /HWC=/! s/$/ HWC=drm_minigbm GRALLOC=minigbm/; }' "$GRUB_CFG"
-    # Hide kernel VT cursor so VNC shows blank screen instead of blinking '_' while Android boots
-    sudo sed -i '/linux \/kernel/{ /vt.global_cursor_default/! s/$/ vt.global_cursor_default=0/; }' "$GRUB_CFG"
+    # HWComposer + Gralloc HAL — values from androiddistro/${DISTRO_NAME}.json
+    sudo sed -i "/linux \/kernel/{ /HWC=/! s|$| HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC}|; }" "$GRUB_CFG"
+    # Extra distro-specific kernel params (idempotent: skip if key already present)
+    for param in "${DISTRO_EXTRA_PARAMS[@]}"; do
+      key="${param%%=*}"
+      sudo sed -i "/linux \/kernel/{ /${key}/! s|$| ${param}|; }" "$GRUB_CFG"
+    done
     # Add serial console so kernel/init messages are visible in serial log
     sudo sed -i '/linux \/kernel/{ /console=ttyS0/! s/$/ console=ttyS0,115200n8/; }' "$GRUB_CFG"
     log "GRUB config after patching:"

@@ -1,0 +1,35 @@
+{
+  "name": "Project Sakura 5.2 FOSS",
+  "slug": "sakura",
+  "android_version": 11,
+  "arch": "x86_64",
+  "base_image": "sakura-foss.qcow2",
+
+  "source": {
+    "type": "direct",
+    "url": "https://sourceforge.net/projects/projectsakura/files/x86_64/ProjectSakura-5.2-FOSS-20220427-1210--OFFICIAL.iso/download",
+    "filename": "ProjectSakura-5.2-FOSS-20220427-1210--OFFICIAL.iso",
+    "sha256": null
+  },
+
+  "grub": {
+    "hwc": "drm",
+    "gralloc": "gbm",
+    "extra_params": [
+      "vt.global_cursor_default=0"
+    ]
+  },
+
+  "qemu": {
+    "preferred_gpu": "virtio-vga-gl",
+    "preferred_display": "sdl,gl=on",
+    "audio_device": "AC97"
+  },
+
+  "notes": [
+    "FOSS build — no GApps; MicroG can be sideloaded post-boot",
+    "HWC=drm_minigbm causes mouse crash in Sakura — use HWC=drm with GRALLOC=gbm",
+    "Requires virgl: pair virtio-vga-gl with sdl,gl=on or gtk,gl=on",
+    "Source: SourceForge ISO — convert to qcow2 via build-intermediate.sh before use"
+  ]
+}

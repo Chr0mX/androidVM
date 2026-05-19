@@ -1,0 +1,33 @@
+{
+  "name": "BlissOS 14",
+  "slug": "bliss14",
+  "android_version": 11,
+  "arch": "x86_64",
+  "base_image": "blissos14-gapps-arm.qcow2",
+
+  "source": {
+    "type": "github_release",
+    "repo": "Chr0mX/androidVM",
+    "asset_pattern": "blissos14-gapps-arm.qcow2*"
+  },
+
+  "grub": {
+    "hwc": "drm_minigbm",
+    "gralloc": "minigbm",
+    "extra_params": [
+      "vt.global_cursor_default=0"
+    ]
+  },
+
+  "qemu": {
+    "preferred_gpu": "virtio-vga",
+    "preferred_display": "gtk,gl=on",
+    "audio_device": "ich9-intel-hda"
+  },
+
+  "notes": [
+    "GApps (pico) + ARM translation pre-installed",
+    "drm_minigbm + minigbm: compatible with VNC (no host GL context required)",
+    "Upgrade to virtio-vga-gl + sdl/gtk,gl=on for interactive mode with virgl"
+  ]
+}
