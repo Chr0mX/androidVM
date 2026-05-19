@@ -106,9 +106,13 @@ CPU_VENDOR=$(detect_cpu_vendor)
 if $NO_KVM; then
   echo "[boot] KVM disabled — using TCG (slow)"
 elif [ -e /dev/kvm ]; then
+  # -enable-kvm activates the KVM hypervisor for near-native CPU performance.
+  # -cpu host exposes the host CPU features directly to the guest.
   KVM_FLAGS=(-enable-kvm -cpu host,+hypervisor)
+  echo "[boot] KVM enabled (${CPU_VENDOR})"
 else
-  echo "[boot] WARNING: /dev/kvm not available — falling back to TCG"
+  echo "[boot] WARNING: /dev/kvm not available — falling back to TCG (slow)"
+  echo "[boot]          Run: sudo modprobe kvm_${CPU_VENDOR} && sudo chmod 666 /dev/kvm"
 fi
 
 # ── GPU flags ─────────────────────────────────────────────────────────────────
