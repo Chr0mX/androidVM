@@ -190,11 +190,17 @@ install_apt() {
   sudo apt-get install -y --no-install-recommends \
     qemu-system-x86 qemu-utils qemu-kvm \
     android-tools-adb \
-    simg2img img2simg \
     e2fsprogs python3 python3-pip \
     jq curl rsync git wget \
     ovmf p7zip-full ca-certificates \
     bridge-utils lzip squashfs-tools parted unzip tar
+  # simg2img/img2simg: standalone on Ubuntu ≤22.04, part of libsparse on Debian 12+ / Ubuntu 24.04+
+  if apt-cache show android-sdk-libsparse-utils &>/dev/null 2>&1; then
+    sudo apt-get install -y --no-install-recommends android-sdk-libsparse-utils
+  else
+    sudo apt-get install -y --no-install-recommends simg2img img2simg 2>/dev/null \
+      || warn "simg2img not available — sparse image conversion may not work"
+  fi
   pip3 install jsonschema --quiet --break-system-packages 2>/dev/null \
     || pip3 install jsonschema --quiet
 }
