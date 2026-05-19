@@ -51,7 +51,7 @@ SYNOPSIS
 
 OPTIONS
   --profile <name>    Device profile to apply   (default: pixel6a-bp1a)
-  --dir <path>        Workspace directory        (default: ~/android11-vm)
+  --dir <path>        Workspace directory        (default: ~/android-vm)
   --repo <url>        Git repo to clone          (default: Chr0mX/androidVM)
   --boot              Launch VM after building
   --skip-verify       Skip ADB verification after boot
@@ -77,7 +77,7 @@ HELP
 
 # ── Defaults (env vars take lowest precedence, flags override them) ────────
 REPO_URL="${ANDROID_VM_REPO:-https://github.com/Chr0mX/androidVM.git}"
-WORKSPACE_DIR="${ANDROID_VM_DIR:-${HOME}/android11-vm}"
+WORKSPACE_DIR="${ANDROID_VM_DIR:-${HOME}/android-vm}"
 STARTER_PROFILE="${ANDROID_VM_PROFILE:-pixel6a-bp1a}"
 DO_BOOT="${ANDROID_VM_BOOT:+true}"; DO_BOOT="${DO_BOOT:-false}"
 SKIP_VERIFY="${ANDROID_VM_SKIP_VFY:+true}"; SKIP_VERIFY="${SKIP_VERIFY:-false}"
