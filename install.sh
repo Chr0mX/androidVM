@@ -193,7 +193,8 @@ install_apt() {
     e2fsprogs python3 python3-pip \
     jq curl rsync git wget \
     ovmf p7zip-full ca-certificates \
-    bridge-utils lzip squashfs-tools parted unzip tar
+    bridge-utils lzip squashfs-tools parted unzip tar \
+    grub-efi-amd64-bin
   # simg2img/img2simg: standalone on Ubuntu ≤22.04, part of libsparse on Debian 12+ / Ubuntu 24.04+
   if apt-cache show android-sdk-libsparse-utils &>/dev/null 2>&1; then
     sudo apt-get install -y --no-install-recommends android-sdk-libsparse-utils
@@ -300,43 +301,38 @@ else
     fi
     bash scripts/build-intermediate.sh
   else
+    DOWNLOAD_OK=false
     if [ -f "scripts/lib/fetch-release.sh" ]; then
-      log "Downloading intermediate image via GitHub API (supports split archives + resume)..."
+      log "Downloading intermediate image via GitHub Releases (split-archive aware, resumable)..."
       OWNER_REPO=$(echo "$REPO_URL" \
         | sed 's|.*github\.com[:/]\(.*\)\.git$|\1|; s|.*github\.com[:/]\(.*\)|\1|')
-      ROOT="${WORKSPACE_DIR}" bash scripts/lib/fetch-release.sh \
-        "$OWNER_REPO" "*.qcow2*" "intermediate/" \
-        || {
-          warn "GitHub API download failed — falling back to direct URL"
+      if ROOT="${WORKSPACE_DIR}" bash scripts/lib/fetch-release.sh \
+          "$OWNER_REPO" "blissos14-gapps-arm.qcow2*" "intermediate/" \
+          --tag-prefix "bliss14-base-"; then
+        DOWNLOAD_OK=true
+      else
+        warn "No bliss14 GitHub Release found — trying direct URL fallback"
+        if curl -fsSL --head "${BASE_IMAGE_RELEASE}/blissos14-gapps-arm.qcow2" &>/dev/null; then
           curl -L --retry 5 --retry-delay 10 --progress-bar \
             "${BASE_IMAGE_RELEASE}/blissos14-gapps-arm.qcow2" \
-            -o "${INTERMEDIATE}.tmp"
-          mv "${INTERMEDIATE}.tmp" "$INTERMEDIATE"
-        }
-    else
-      log "Downloading pre-built intermediate image from GitHub Releases..."
-      curl -L --retry 5 --retry-delay 10 \
-           --progress-bar \
-           "${BASE_IMAGE_RELEASE}/blissos14-gapps-arm.qcow2" \
-           -o "${INTERMEDIATE}.tmp"
-
-      if curl -fsSL "${BASE_IMAGE_RELEASE}/blissos14-gapps-arm.qcow2.sha256" \
-               -o /tmp/image.sha256 2>/dev/null; then
-        log "Verifying checksum..."
-        EXPECTED=$(awk '{print $1}' /tmp/image.sha256)
-        ACTUAL=$(sha256sum "${INTERMEDIATE}.tmp" | awk '{print $1}')
-        if [ "$EXPECTED" = "$ACTUAL" ]; then
-          ok "Checksum verified"
-        else
-          rm -f "${INTERMEDIATE}.tmp"
-          die "Checksum mismatch! Expected: ${EXPECTED}  Got: ${ACTUAL}"
+            -o "${INTERMEDIATE}.tmp" \
+            && mv "${INTERMEDIATE}.tmp" "$INTERMEDIATE" \
+            && DOWNLOAD_OK=true \
+            || rm -f "${INTERMEDIATE}.tmp"
         fi
-      else
-        warn "No .sha256 file found at release URL — skipping checksum verification"
       fi
-
-      mv "${INTERMEDIATE}.tmp" "$INTERMEDIATE"
     fi
+
+    if ! $DOWNLOAD_OK || [ ! -f "$INTERMEDIATE" ]; then
+      warn "No pre-built release image available — building intermediate locally from ISO"
+      log "This will download ~1.5 GB and take 30–90 minutes depending on your hardware"
+      if [ ! -d "arm-trans/libndk_translation" ]; then
+        log "Fetching ARM translation libs..."
+        bash scripts/lib/fetch-arm-trans.sh arm-trans/
+      fi
+      bash scripts/lib/fetch-distro.sh bliss14
+    fi
+
     [ -f "$INTERMEDIATE" ] && ok "Intermediate image ready ($(du -sh "$INTERMEDIATE" | cut -f1))"
   fi
 fi
