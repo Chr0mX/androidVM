@@ -204,8 +204,9 @@ OVMF_PATH=$(jq -r '.ovmf_path // empty' "$DEFAULTS_JSON" 2>/dev/null || true)
 if [ -z "$OVMF_PATH" ] || [ ! -f "$OVMF_PATH" ]; then
   for candidate in \
       /usr/share/OVMF/OVMF_CODE.fd \
-      /usr/share/OVMF/OVMF_CODE_4M.fd \
       /usr/share/ovmf/OVMF.fd \
+      /usr/share/OVMF/OVMF_CODE_4M.fd \
+      /usr/share/OVMF/OVMF_4M.fd \
       /usr/share/qemu/OVMF.fd \
       /usr/share/edk2/ovmf/OVMF_CODE.fd; do
     if [ -f "$candidate" ]; then
@@ -240,7 +241,7 @@ qemu-system-x86_64 \
   -device virtio-net-pci,netdev=net0 \
   -netdev "user,id=net0,hostfwd=tcp::${ADB_PORT}-:5555" \
   -device virtio-rng-pci \
-  -bios "$OVMF_PATH" \
+  -drive "if=pflash,format=raw,readonly=on,file=${OVMF_PATH}" \
   "${SERIAL_FLAGS[@]}" &
 
 QEMU_PID=$!
