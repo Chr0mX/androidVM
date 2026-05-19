@@ -300,7 +300,7 @@ cmd_doctor() {
   fi
 
   printf "\n${DIM}━━━ Images ━━━${NC}\n"
-  local intermediate="${ROOT}/intermediate/android11-gapps-arm.qcow2"
+  local intermediate="${ROOT}/intermediate/blissos14-gapps-arm.qcow2"
   if [ -f "$intermediate" ]; then
     local sz
     sz=$(du -sh "$intermediate" 2>/dev/null | cut -f1)
