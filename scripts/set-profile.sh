@@ -107,10 +107,11 @@ else
   fi
 
   # Detect system layout: system-partition image vs rootfs image
-  if [ -f "${MNT_SYSTEM}/build.prop" ] || [ -d "${MNT_SYSTEM}/app" ] || [ -d "${MNT_SYSTEM}/lib" ]; then
+  # Use sudo test — files in the mounted ext4 may be root-owned with 600/700 perms
+  if sudo test -f "${MNT_SYSTEM}/build.prop" || sudo test -d "${MNT_SYSTEM}/app" || sudo test -d "${MNT_SYSTEM}/lib"; then
     SYS_DIR="$MNT_SYSTEM"
     log "Layout: system-partition (build.prop at ${SYS_DIR}/)"
-  elif [ -f "${MNT_SYSTEM}/system/build.prop" ] || [ -d "${MNT_SYSTEM}/system/app" ]; then
+  elif sudo test -f "${MNT_SYSTEM}/system/build.prop" || sudo test -d "${MNT_SYSTEM}/system/app"; then
     SYS_DIR="${MNT_SYSTEM}/system"
     log "Layout: rootfs (build.prop at ${SYS_DIR}/)"
   else
@@ -143,28 +144,28 @@ else
     log "No product partition — skipping"
   fi
 
-  # ── Patch props ──────────────────────────────────────────────────────────
+  # ── Patch props (sudo required — files owned by root in mounted ext4) ────
   log "Patching system/build.prop ..."
-  python3 "${SCRIPT_DIR}/lib/patch-props.py" \
+  sudo python3 "${SCRIPT_DIR}/lib/patch-props.py" \
     "${SYS_DIR}/build.prop" system "$PROFILE_FILE"
 
-  if [ -f "${VENDOR_DIR}/build.prop" ]; then
+  if sudo test -f "${VENDOR_DIR}/build.prop"; then
     log "Patching vendor/build.prop ..."
-    python3 "${SCRIPT_DIR}/lib/patch-props.py" \
+    sudo python3 "${SCRIPT_DIR}/lib/patch-props.py" \
       "${VENDOR_DIR}/build.prop" vendor "$PROFILE_FILE"
   else
     log "WARNING: vendor/build.prop not found at ${VENDOR_DIR}/build.prop"
   fi
 
-  if [ -f "${VENDOR_DIR}/default.prop" ]; then
+  if sudo test -f "${VENDOR_DIR}/default.prop"; then
     log "Patching vendor/default.prop ..."
-    python3 "${SCRIPT_DIR}/lib/patch-props.py" \
+    sudo python3 "${SCRIPT_DIR}/lib/patch-props.py" \
       "${VENDOR_DIR}/default.prop" vendor "$PROFILE_FILE"
   fi
 
-  if [ -n "$PRODUCT_DIR" ] && [ -f "${PRODUCT_DIR}/build.prop" ]; then
+  if [ -n "$PRODUCT_DIR" ] && sudo test -f "${PRODUCT_DIR}/build.prop"; then
     log "Patching product/build.prop ..."
-    python3 "${SCRIPT_DIR}/lib/patch-props.py" \
+    sudo python3 "${SCRIPT_DIR}/lib/patch-props.py" \
       "${PRODUCT_DIR}/build.prop" product "$PROFILE_FILE"
   fi
 
