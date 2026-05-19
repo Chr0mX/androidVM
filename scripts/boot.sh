@@ -198,8 +198,23 @@ mkdir -p "$RUN_DIR"
 PID_FILE="${RUN_DIR}/${PROFILE_NAME}.pid"
 
 ADB_PORT=$(jq -r '.adb_port // 5555' "$DEFAULTS_JSON" 2>/dev/null || echo "5555")
-OVMF_PATH=$(jq -r '.ovmf_path // "/usr/share/OVMF/OVMF_CODE.fd"' "$DEFAULTS_JSON" 2>/dev/null \
-  || echo "/usr/share/OVMF/OVMF_CODE.fd")
+
+# Resolve OVMF firmware — path differs by distro/package
+OVMF_PATH=$(jq -r '.ovmf_path // empty' "$DEFAULTS_JSON" 2>/dev/null || true)
+if [ -z "$OVMF_PATH" ] || [ ! -f "$OVMF_PATH" ]; then
+  for candidate in \
+      /usr/share/OVMF/OVMF_CODE.fd \
+      /usr/share/OVMF/OVMF_CODE_4M.fd \
+      /usr/share/ovmf/OVMF.fd \
+      /usr/share/qemu/OVMF.fd \
+      /usr/share/edk2/ovmf/OVMF_CODE.fd; do
+    if [ -f "$candidate" ]; then
+      OVMF_PATH="$candidate"
+      break
+    fi
+  done
+fi
+[ -f "$OVMF_PATH" ] || die "OVMF firmware not found. Install it: sudo apt install ovmf"
 
 echo "[boot] Starting VM: profile=${PROFILE_NAME}  vm-profile=${VM_PROFILE_NAME}"
 echo "[boot] Resources:   ${CPU_CORES}c/${CPU_THREADS}t  ${RAM_MB}MB RAM"
