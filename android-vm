@@ -253,9 +253,27 @@ cmd_update() {
         | sed 's|.*github\.com[:/]\(.*\)\.git$|\1|; s|.*github\.com[:/]\(.*\)|\1|')
     fi
     if [ -n "$owner_repo" ]; then
-      log "Checking for intermediate image updates (${owner_repo})..."
-      bash "$fetch_script" "$owner_repo" "*.qcow2*" "${ROOT}/intermediate/" \
-        || warn "Image update failed — existing image unchanged"
+      local updated=0
+      for distro_cfg in "${ROOT}"/androiddistro/*.json; do
+        [ -f "$distro_cfg" ] || continue
+        local slug base_image
+        slug=$(       jq -r '.slug'       "$distro_cfg" 2>/dev/null) || continue
+        base_image=$( jq -r '.base_image' "$distro_cfg" 2>/dev/null) || continue
+        log "Checking for updated intermediate: ${slug} (${base_image})..."
+        ROOT="${ROOT}" bash "$fetch_script" \
+          "$owner_repo" "${base_image}*" "${ROOT}/intermediate/" \
+          --tag-prefix "${slug}-base-" \
+          && updated=$(( updated + 1 )) \
+          || warn "No GitHub Release found for '${slug}' — build locally: bash scripts/lib/fetch-distro.sh ${slug}"
+      done
+      ok "${updated} distro image(s) checked/updated"
+      log "Rebuild profiles to apply updated images:"
+      for f in "${ROOT}"/builds/android11-*-latest.qcow2; do
+        [ -L "$f" ] || continue
+        local pname
+        pname=$(basename "$f" | sed 's/android11-//;s/-latest\.qcow2//')
+        log "  bash scripts/set-profile.sh ${pname} --rebuild"
+      done
     else
       warn "Cannot determine GitHub repo from remote URL — skipping image update"
     fi

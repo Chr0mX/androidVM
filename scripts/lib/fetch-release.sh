@@ -16,9 +16,18 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-OWNER_REPO="${1:?Usage: fetch-release.sh <owner/repo> <asset-pattern> <dest-dir>}"
+OWNER_REPO="${1:?Usage: fetch-release.sh <owner/repo> <asset-pattern> <dest-dir> [--tag-prefix <prefix>]}"
 PATTERN="${2:?}"
 DEST_DIR="${3:?}"
+TAG_PREFIX=""
+
+shift 3 || true
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tag-prefix) TAG_PREFIX="${2:?--tag-prefix requires a value}"; shift 2 ;;
+    *) echo "[fetch-release] Unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${ROOT:="$(cd "${SCRIPT_DIR}/../.." && pwd)"}"
@@ -88,8 +97,13 @@ matches_pattern() {
 }
 
 # ── Main ───────────────────────────────────────────────────────────────────────
-API_URL="https://api.github.com/repos/${OWNER_REPO}/releases/latest"
-log "Fetching release metadata: ${OWNER_REPO}"
+if [ -n "$TAG_PREFIX" ]; then
+  API_URL="https://api.github.com/repos/${OWNER_REPO}/releases?per_page=20"
+  log "Fetching releases (tag prefix: ${TAG_PREFIX}): ${OWNER_REPO}"
+else
+  API_URL="https://api.github.com/repos/${OWNER_REPO}/releases/latest"
+  log "Fetching latest release: ${OWNER_REPO}"
+fi
 
 RELEASE_JSON=""
 if ! RELEASE_JSON=$(api_get "$API_URL" 2>/dev/null); then
@@ -101,6 +115,16 @@ if ! RELEASE_JSON=$(api_get "$API_URL" 2>/dev/null); then
   log "Trying: ${FALLBACK_URL}"
   download_file "$FALLBACK_URL" "${DEST_DIR}/$(basename "$FALLBACK_URL")"
   exit 0
+fi
+
+# When --tag-prefix is set the API returned an array; pick the first matching release
+if [ -n "$TAG_PREFIX" ]; then
+  RELEASE_JSON=$(echo "$RELEASE_JSON" \
+    | jq --arg p "$TAG_PREFIX" 'map(select(.tag_name | startswith($p))) | first // empty')
+  if [ -z "$RELEASE_JSON" ] || [ "$RELEASE_JSON" = "null" ]; then
+    die "No release with tag prefix '${TAG_PREFIX}' found in ${OWNER_REPO}"
+  fi
+  log "Using release: $(echo "$RELEASE_JSON" | jq -r '.tag_name')"
 fi
 
 # Check for empty assets

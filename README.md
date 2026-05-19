@@ -23,6 +23,34 @@ android-vm start pixel7-ap1a --vm-profile performance
 android-vm doctor                             # verify everything is set up
 ```
 
+## Updating to New CI Images
+
+When CI publishes a new base image (tagged `bliss14-base-YYYYMMDD-HHMM` or `sakura-base-YYYYMMDD-HHMM`), update your local setup in three steps:
+
+```bash
+# 1. Pull latest scripts and configs
+git pull
+
+# 2. Download new intermediate image(s) from GitHub Releases
+android-vm update
+# Iterates every distro in androiddistro/ and downloads its latest CI release.
+# Warns (does not fail) if a distro has no release yet.
+
+# 3. Rebuild each profile to link against the fresh intermediate
+bash scripts/set-profile.sh pixel6a-bp1a --rebuild
+bash scripts/set-profile.sh pixel7-ap1a  --rebuild   # repeat for each profile you use
+```
+
+> **Why rebuild?** Each profile image is a thin qcow2 layer that points to the intermediate via a backing-file chain. `android-vm update` replaces the intermediate file, but existing profile layers still reference the old content until you rebuild them.
+
+Check what you currently have:
+```bash
+android-vm doctor      # reports intermediate + profile image sizes, KVM, disk space
+android-vm profiles    # shows [built] marker for profiles with a qcow2 on disk
+```
+
+---
+
 ## android-vm CLI
 
 The unified `android-vm` command is installed to `/usr/local/bin` by the installer.
@@ -159,7 +187,7 @@ workspace/
 │   ├── pixel7-ap1a.json
 │   └── samsung-s23-eu.json
 ├── scripts/
-│   ├── build-intermediate.sh   # Build intermediate layer (run once)
+│   ├── build-intermediate.sh   # Legacy: manual intermediate build (use fetch-distro.sh instead)
 │   ├── set-profile.sh          # Create per-profile build
 │   ├── boot.sh                 # Launch VM in QEMU/KVM
 │   ├── verify.sh               # ADB-based verification
@@ -216,17 +244,21 @@ ro.product.cpu.abilist=x86_64,x86,arm64-v8a,armeabi-v7a,armeabi
 ## Common Commands
 
 ```bash
-# Download and build a distro's intermediate image (replaces build-intermediate.sh for new distros)
-bash scripts/lib/fetch-distro.sh bliss14          # BlissOS 14 (downloads from SourceForge)
-bash scripts/lib/fetch-distro.sh sakura           # Project Sakura FOSS
-bash scripts/lib/fetch-distro.sh bliss14 --force  # Force rebuild
+# Get latest CI-built images + show rebuild instructions
+git pull && android-vm update
 
-# Build a profile image (specify distro with --distro, default: bliss14)
+# Build/refresh an intermediate image locally (if no CI release exists yet)
+bash scripts/lib/fetch-distro.sh bliss14          # BlissOS 14
+bash scripts/lib/fetch-distro.sh sakura           # Project Sakura FOSS
+bash scripts/lib/fetch-distro.sh bliss14 --force  # Force full rebuild
+
+# Build a profile image (--distro defaults to bliss14)
 bash scripts/set-profile.sh pixel6a-bp1a
 bash scripts/set-profile.sh pixel6a-bp1a --distro sakura --rebuild
 
-# Boot it
+# Boot
 bash scripts/boot.sh pixel6a-bp1a
+bash scripts/boot.sh pixel6a-bp1a --vnc      # headless, VNC on port 5900
 
 # Connect ADB
 adb connect localhost:5555
@@ -234,11 +266,12 @@ adb connect localhost:5555
 # Verify identity props, ARM bridge, and no emulator leaks
 bash scripts/verify.sh profiles/pixel6a-bp1a.json
 
-# Switch profile
+# Switch profile or distro
 bash scripts/set-profile.sh pixel7-ap1a --rebuild --boot --check
+bash scripts/set-profile.sh pixel6a-bp1a --distro sakura --rebuild
 
 # Reset userdata (factory wipe without rebuilding image)
-qemu-img create -f qcow2 userdata/userdata-pixel6a-bp1a.qcow2 8G
+android-vm reset pixel6a-bp1a
 ```
 
 ## Multiple Distros
@@ -250,16 +283,39 @@ The `androiddistro/` directory contains per-distro JSON configs that control the
 | `bliss14` | BlissOS 14 | ✓ OpenGApps pico | SourceForge (auto-latest) | `drm_minigbm` / `minigbm` |
 | `sakura` | Project Sakura 5.2 FOSS | ✗ (FOSS) | SourceForge (direct) | `drm` / `gbm` |
 
-```bash
-# Build a Project Sakura intermediate image locally
-bash scripts/lib/fetch-distro.sh sakura
+### Using Project Sakura
 
-# Then build any profile against it
-bash scripts/set-profile.sh pixel6a-bp1a --distro sakura --rebuild
-bash scripts/boot.sh pixel6a-bp1a --vnc
+Sakura is a FOSS build with no GApps pre-installed. It requires virgl (host OpenGL) for full GPU acceleration.
+
+**Option A — download from CI** (if a `sakura-base-*` release exists):
+```bash
+git pull && android-vm update   # automatically picks up sakura-foss.qcow2
 ```
 
-The CI workflow (`build-base.yml`) builds both distros in parallel and publishes separate GitHub Releases tagged `bliss14-base-YYYYMMDD-HHMM` and `sakura-base-YYYYMMDD-HHMM`.
+**Option B — build locally** (downloads ISO from SourceForge, ~30–90 min):
+```bash
+bash scripts/lib/fetch-distro.sh sakura
+```
+
+Then build a profile and boot:
+```bash
+bash scripts/set-profile.sh pixel6a-bp1a --distro sakura --rebuild
+bash scripts/boot.sh pixel6a-bp1a --vnc    # VNC works; GL-accelerated display needs virgl
+```
+
+> **Note:** Sakura requires `HWC=drm GRALLOC=gbm`. It is incompatible with `drm_minigbm` (causes a mouse crash on Sakura). Never mix Sakura's intermediate image with BlissOS GRUB params — `set-profile.sh --distro sakura` applies the correct values automatically.
+
+### Switching between distros
+
+Each profile build is tied to the intermediate it was built from. To switch a profile from BlissOS to Sakura (or back), simply rebuild it with the new `--distro` flag:
+
+```bash
+bash scripts/set-profile.sh pixel6a-bp1a --distro sakura  --rebuild
+# or back to BlissOS:
+bash scripts/set-profile.sh pixel6a-bp1a --distro bliss14 --rebuild
+```
+
+The CI workflow (`build-base.yml`) builds both distros in parallel and publishes separate GitHub Releases. `android-vm update` downloads the latest of each automatically.
 
 ### Device Identity Spoofing
 
