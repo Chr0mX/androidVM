@@ -143,8 +143,10 @@ if $SPICE_MODE; then
   GPU_FLAGS=()   # SPICE manages its own rendering
 elif $VNC_MODE; then
   VNC_PORT=$(( 5900 + VNC_DISPLAY ))
-  DISPLAY_FLAGS=(-display none -vnc ":${VNC_DISPLAY}")
-  GPU_FLAGS=(-device "virtio-vga,xres=1080,yres=1920")
+  # egl-headless supplies the host GL context virgl needs without opening a window;
+  # -vnc captures the rendered framebuffer for remote viewing.
+  GPU_FLAGS=(-device "virtio-vga-gl,xres=1080,yres=1920")
+  DISPLAY_FLAGS=(-display egl-headless -vnc ":${VNC_DISPLAY}")
   echo "[boot] VNC:         vnc://localhost:${VNC_PORT}  (display :${VNC_DISPLAY})"
 elif $HEADLESS; then
   DISPLAY_FLAGS=(-display none)
