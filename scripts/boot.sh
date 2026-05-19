@@ -7,19 +7,22 @@
 #   --no-kvm              Force TCG emulation (no KVM)
 #   --headless            No display window
 #   --spice               Headless + SPICE remote display on port 5900
+#   --vnc [display]       Headless + VNC on given display number (default: 0 → port 5900)
 #   --snapshot            Ephemeral mode — changes to main image not persisted
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-PROFILE_NAME="${1:?Usage: boot.sh <profile-name> [--vm-profile <name>] [--no-kvm] [--headless] [--spice] [--snapshot]}"
+PROFILE_NAME="${1:?Usage: boot.sh <profile-name> [--vm-profile <name>] [--no-kvm] [--headless] [--spice] [--vnc [display]] [--snapshot]}"
 shift || true
 
 VM_PROFILE_NAME=""
 NO_KVM=false
 HEADLESS=false
 SPICE_MODE=false
+VNC_MODE=false
+VNC_DISPLAY="0"
 SNAPSHOT=false
 
 while [[ $# -gt 0 ]]; do
@@ -28,6 +31,15 @@ while [[ $# -gt 0 ]]; do
     --no-kvm)     NO_KVM=true;          shift   ;;
     --headless)   HEADLESS=true;        shift   ;;
     --spice)      SPICE_MODE=true;      shift   ;;
+    --vnc)
+      VNC_MODE=true
+      # Accept optional display number (e.g. --vnc 1); skip if next arg is a flag or absent
+      if [[ $# -gt 1 && "$2" =~ ^[0-9]+$ ]]; then
+        VNC_DISPLAY="$2"; shift 2
+      else
+        shift
+      fi
+      ;;
     --snapshot)   SNAPSHOT=true;        shift   ;;
     *) echo "[boot] Unknown argument: $1" >&2; exit 1 ;;
   esac
@@ -125,6 +137,11 @@ if $SPICE_MODE; then
     -device "virtserialport,chardev=vdagent,name=com.redhat.spice.0"
   )
   GPU_FLAGS=()   # SPICE manages its own rendering
+elif $VNC_MODE; then
+  VNC_PORT=$(( 5900 + VNC_DISPLAY ))
+  DISPLAY_FLAGS=(-display none -vnc ":${VNC_DISPLAY}")
+  GPU_FLAGS=()   # VNC uses software rendering
+  echo "[boot] VNC:         vnc://localhost:${VNC_PORT}  (display :${VNC_DISPLAY})"
 elif $HEADLESS; then
   DISPLAY_FLAGS=(-display none)
 else

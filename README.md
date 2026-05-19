@@ -78,6 +78,36 @@ remote-viewer spice://localhost:5900
 
 Install a SPICE client: `sudo apt install virt-viewer` (provides `remote-viewer`).
 
+## VNC Remote Display
+
+VNC is a simpler alternative to SPICE — any VNC viewer works, no special client needed:
+
+```bash
+# Display :0 → port 5900 (default)
+bash scripts/boot.sh pixel6a-bp1a --vnc
+
+# Display :1 → port 5901
+bash scripts/boot.sh pixel6a-bp1a --vnc 1
+
+# Then connect:
+vncviewer localhost:5900
+```
+
+VNC uses software rendering (no OpenGL required) and works well over SSH tunnels:
+
+```bash
+# Forward VNC over SSH from a remote machine:
+ssh -L 5900:localhost:5900 user@host
+vncviewer localhost:5900
+```
+
+Install a VNC client: `sudo apt install tigervnc-viewer` or use Remmina, RealVNC, or any VNC-compatible client.
+
+| Method | Flag | Port | Client | Best for |
+|---|---|---|---|---|
+| SPICE | `--spice` | 5900 | `virt-viewer` / `remote-viewer` | Performance, clipboard sharing |
+| VNC | `--vnc [n]` | 5900+n | Any VNC viewer | Maximum compatibility, SSH tunnels |
+
 ### Env var overrides (for the curl pipe case)
 
 | Env var | Flag equivalent | Description |
