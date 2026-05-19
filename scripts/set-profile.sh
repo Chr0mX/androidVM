@@ -32,8 +32,13 @@ INTERMEDIATE="${ROOT}/intermediate/blissos14-gapps-arm.qcow2"
 OUT_IMG="${ROOT}/builds/android11-${PROFILE_NAME}-$(date +%Y%m%d).qcow2"
 LATEST_LINK="${ROOT}/builds/android11-${PROFILE_NAME}-latest.qcow2"
 
+# p2 = Android data partition (holds system.img, kernel, grub.cfg, etc.)
+MNT_ANDROID="${ROOT}/mnt/android"
+# Loop-mounted from system.img on p2
 MNT_SYSTEM="${ROOT}/mnt/system"
+# Loop-mounted from vendor.img on p2 (if a separate vendor.img exists)
 MNT_VENDOR="${ROOT}/mnt/vendor"
+# Loop-mounted from product.img on p2 (if a separate product.img exists)
 MNT_PRODUCT="${ROOT}/mnt/product"
 
 log() { echo "[set-profile] $*"; }
@@ -70,16 +75,18 @@ else
   sudo qemu-nbd --connect=/dev/nbd0 "$OUT_IMG"
   sleep 2
 
-  mkdir -p "$MNT_SYSTEM" "$MNT_VENDOR" "$MNT_PRODUCT"
+  mkdir -p "$MNT_ANDROID" "$MNT_SYSTEM" "$MNT_VENDOR" "$MNT_PRODUCT"
 
-  VENDOR_MOUNTED=false
-  PRODUCT_MOUNTED=false
+  SYSTEM_IMG_MOUNTED=false
+  VENDOR_IMG_MOUNTED=false
+  PRODUCT_IMG_MOUNTED=false
 
   cleanup() {
     log "Unmounting partitions ..."
-    $PRODUCT_MOUNTED && sudo umount "$MNT_PRODUCT" 2>/dev/null || true
-    $VENDOR_MOUNTED  && sudo umount "$MNT_VENDOR"  2>/dev/null || true
-    sudo umount "$MNT_SYSTEM" 2>/dev/null || true
+    $PRODUCT_IMG_MOUNTED && sudo umount "$MNT_PRODUCT" 2>/dev/null || true
+    $VENDOR_IMG_MOUNTED  && sudo umount "$MNT_VENDOR"  2>/dev/null || true
+    $SYSTEM_IMG_MOUNTED  && sudo umount "$MNT_SYSTEM"  2>/dev/null || true
+    sudo umount "$MNT_ANDROID" 2>/dev/null || true
     sudo qemu-nbd --disconnect /dev/nbd0 2>/dev/null || true
   }
   trap cleanup EXIT
@@ -87,56 +94,83 @@ else
   log "Partition layout:"
   lsblk /dev/nbd0
 
-  sudo mount /dev/nbd0p2 "$MNT_SYSTEM"
+  # p2 = Android data partition (contains system.img, grub.cfg, kernel, etc.)
+  sudo mount /dev/nbd0p2 "$MNT_ANDROID"
 
-  # Vendor: try separate partition first; fall back to system/vendor directory
-  if sudo mount /dev/nbd0p5 "$MNT_VENDOR" 2>/dev/null; then
-    VENDOR_MOUNTED=true
-    log "Vendor: mounted nbd0p5"
+  # Loop-mount the inner system.img to reach the actual Android system files
+  if [ -f "${MNT_ANDROID}/system.img" ]; then
+    sudo mount -o loop,rw "${MNT_ANDROID}/system.img" "$MNT_SYSTEM"
+    SYSTEM_IMG_MOUNTED=true
+    log "Mounted system.img (loop)"
   else
-    log "No separate vendor partition — using ${MNT_SYSTEM}/vendor"
-    MNT_VENDOR="${MNT_SYSTEM}/vendor"
+    die "system.img not found on data partition (${MNT_ANDROID}) — is this a valid BlissOS image?"
   fi
 
-  # Product: try separate partition; fall back to system/product directory, or skip
-  if sudo mount /dev/nbd0p6 "$MNT_PRODUCT" 2>/dev/null; then
-    PRODUCT_MOUNTED=true
-    log "Product: mounted nbd0p6"
-  elif [ -d "${MNT_SYSTEM}/product" ]; then
-    log "No separate product partition — using ${MNT_SYSTEM}/product"
-    MNT_PRODUCT="${MNT_SYSTEM}/product"
+  # Detect system layout: system-partition image vs rootfs image
+  if [ -f "${MNT_SYSTEM}/build.prop" ] || [ -d "${MNT_SYSTEM}/app" ] || [ -d "${MNT_SYSTEM}/lib" ]; then
+    SYS_DIR="$MNT_SYSTEM"
+    log "Layout: system-partition (build.prop at ${SYS_DIR}/)"
+  elif [ -f "${MNT_SYSTEM}/system/build.prop" ] || [ -d "${MNT_SYSTEM}/system/app" ]; then
+    SYS_DIR="${MNT_SYSTEM}/system"
+    log "Layout: rootfs (build.prop at ${SYS_DIR}/)"
   else
+    SYS_DIR="$MNT_SYSTEM"
+    log "Layout: unknown — defaulting to system-partition"
+  fi
+
+  # Vendor: separate vendor.img or directory inside system
+  if [ -f "${MNT_ANDROID}/vendor.img" ]; then
+    sudo mount -o loop,rw "${MNT_ANDROID}/vendor.img" "$MNT_VENDOR"
+    VENDOR_IMG_MOUNTED=true
+    VENDOR_DIR="$MNT_VENDOR"
+    log "Mounted vendor.img (loop)"
+  else
+    VENDOR_DIR="${SYS_DIR}/vendor"
+    log "Vendor: using ${VENDOR_DIR}"
+  fi
+
+  # Product: separate product.img, directory inside system, or skip
+  if [ -f "${MNT_ANDROID}/product.img" ]; then
+    sudo mount -o loop,rw "${MNT_ANDROID}/product.img" "$MNT_PRODUCT"
+    PRODUCT_IMG_MOUNTED=true
+    PRODUCT_DIR="$MNT_PRODUCT"
+    log "Mounted product.img (loop)"
+  elif [ -d "${SYS_DIR}/product" ]; then
+    PRODUCT_DIR="${SYS_DIR}/product"
+    log "Product: using ${PRODUCT_DIR}"
+  else
+    PRODUCT_DIR=""
     log "No product partition — skipping"
-    MNT_PRODUCT=""
   fi
 
   # ── Patch props ──────────────────────────────────────────────────────────
   log "Patching system/build.prop ..."
   python3 "${SCRIPT_DIR}/lib/patch-props.py" \
-    "$MNT_SYSTEM/build.prop" system "$PROFILE_FILE"
+    "${SYS_DIR}/build.prop" system "$PROFILE_FILE"
 
-  if [ -f "$MNT_VENDOR/build.prop" ]; then
+  if [ -f "${VENDOR_DIR}/build.prop" ]; then
     log "Patching vendor/build.prop ..."
     python3 "${SCRIPT_DIR}/lib/patch-props.py" \
-      "$MNT_VENDOR/build.prop" vendor "$PROFILE_FILE"
+      "${VENDOR_DIR}/build.prop" vendor "$PROFILE_FILE"
   else
-    log "WARNING: vendor/build.prop not found at ${MNT_VENDOR}/build.prop"
+    log "WARNING: vendor/build.prop not found at ${VENDOR_DIR}/build.prop"
   fi
 
-  if [ -f "$MNT_VENDOR/default.prop" ]; then
+  if [ -f "${VENDOR_DIR}/default.prop" ]; then
     log "Patching vendor/default.prop ..."
     python3 "${SCRIPT_DIR}/lib/patch-props.py" \
-      "$MNT_VENDOR/default.prop" vendor "$PROFILE_FILE"
+      "${VENDOR_DIR}/default.prop" vendor "$PROFILE_FILE"
   fi
 
-  if [ -n "$MNT_PRODUCT" ] && [ -f "$MNT_PRODUCT/build.prop" ]; then
+  if [ -n "$PRODUCT_DIR" ] && [ -f "${PRODUCT_DIR}/build.prop" ]; then
     log "Patching product/build.prop ..."
     python3 "${SCRIPT_DIR}/lib/patch-props.py" \
-      "$MNT_PRODUCT/build.prop" product "$PROFILE_FILE"
+      "${PRODUCT_DIR}/build.prop" product "$PROFILE_FILE"
   fi
 
   # ── Patch GRUB config for userdata partition ──────────────────────────────
-  GRUB_CFG="${MNT_SYSTEM}/boot/grub/grub.cfg"
+  # grub.cfg lives on the Android data partition (p2), not inside system.img
+  GRUB_CFG="${MNT_ANDROID}/boot/grub/grub.cfg"
   if [ -f "$GRUB_CFG" ]; then
     log "Patching GRUB config: DATA=/dev/vdb ..."
     sudo sed -i 's/ DATA= / DATA=\/dev\/vdb /g' "$GRUB_CFG"
