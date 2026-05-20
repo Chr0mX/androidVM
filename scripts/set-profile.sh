@@ -1,27 +1,34 @@
 #!/usr/bin/env bash
 # Create a per-profile bootable image by layering identity props onto the intermediate.
 #
-# Usage: set-profile.sh <profile-name> [--distro <name>] [--rebuild] [--boot] [--check]
-#                                       [--boot-param <param>] ...
+# Usage: set-profile.sh <profile-name> [OPTIONS]
 #
-#   --distro <name>       Android distro to use (default: bliss14); matches androiddistro/<name>.json
+#   --distro <name>       Android distro (default: bliss14); matches androiddistro/<name>.json
 #   --rebuild             Force recreation even if a same-day build already exists
 #   --boot                Launch the VM after building
 #   --check               Run verify.sh against the booted VM
-#   --boot-param <param>  Append an extra kernel parameter to the boot command line.
-#                         May be repeated: --boot-param quiet --boot-param nomodeset
+#   --boot-param <param>  Append an extra kernel parameter (repeatable)
+#   --debug [1|2]         Debug boot: add DEBUG=<level>, remove 'quiet'.
+#                           Level 1 (default): busybox shell before Android init — type 'exit' to continue
+#                           Level 2: additional shell breakpoints at each init stage
+#                           Ref: https://docs.blissos.org/knowledgebase/troubleshooting/debug-booting/
+#   --nomodeset           Graphics debug: disable DRM/KMS, force software framebuffer (VGA/VESA).
+#                           Use when display is black or GPU init hangs.
+#                           Ref: https://docs.blissos.org/knowledgebase/troubleshooting/graphics-troubleshooting/
 set -euo pipefail
 IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-PROFILE_NAME="${1:?Usage: set-profile.sh <profile-name> [--distro <name>] [--rebuild] [--boot] [--check] [--boot-param <param>]}"
+PROFILE_NAME="${1:?Usage: set-profile.sh <profile-name> [--distro <name>] [--rebuild] [--boot] [--check] [--boot-param <param>] [--debug [1|2]] [--nomodeset]}"
 DISTRO_NAME="bliss14"
 REBUILD=false
 BOOT=false
 CHECK=false
 EXTRA_BOOT_PARAMS=()
+DEBUG_LEVEL=""   # empty = no debug; "1" or "2" = DEBUG=<level> + strip quiet
+NOMODESET=false
 
 shift
 while [[ $# -gt 0 ]]; do
@@ -31,6 +38,12 @@ while [[ $# -gt 0 ]]; do
     --boot)       BOOT=true;     shift ;;
     --check)      CHECK=true;    shift ;;
     --boot-param) EXTRA_BOOT_PARAMS+=("${2:?--boot-param requires a value}"); shift 2 ;;
+    --nomodeset)  NOMODESET=true; shift ;;
+    --debug)
+      DEBUG_LEVEL="1"
+      shift
+      if [[ "${1:-}" =~ ^[12]$ ]]; then DEBUG_LEVEL="$1"; shift; fi
+      ;;
     *) echo "[set-profile] Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -254,6 +267,17 @@ else
       key="${param%%=*}"
       sudo sed -i "/^\s*options /{ /${key}/! s|\"$| ${param}\"|; }" "$REFIND_CFG"
     done
+    # --debug: strip 'quiet', add DEBUG=<level>
+    if [ -n "$DEBUG_LEVEL" ]; then
+      sudo sed -i '/^\s*options /s/ quiet\b//g' "$REFIND_CFG"
+      sudo sed -i "/^\s*options /{ /DEBUG=/! s|\"$| DEBUG=${DEBUG_LEVEL}\"|; }" "$REFIND_CFG"
+      log "Debug boot enabled (DEBUG=${DEBUG_LEVEL}) — type 'exit' at busybox prompt to continue"
+    fi
+    # --nomodeset: disable DRM/KMS, force software framebuffer
+    if $NOMODESET; then
+      sudo sed -i "/^\s*options /{ /nomodeset/! s|\"$| nomodeset\"|; }" "$REFIND_CFG"
+      log "nomodeset enabled — DRM/KMS disabled, using software framebuffer"
+    fi
     # Serial console for serial log visibility
     sudo sed -i "/^\s*options /{ /console=ttyS0/! s|\"$| console=ttyS0,115200n8\"|; }" "$REFIND_CFG"
     log "rEFInd options after patching:"
@@ -274,6 +298,17 @@ else
       key="${param%%=*}"
       sudo sed -i "/linux \/kernel/{ /${key}/! s|$| ${param}|; }" "$GRUB_CFG"
     done
+    # --debug: strip 'quiet', add DEBUG=<level>
+    if [ -n "$DEBUG_LEVEL" ]; then
+      sudo sed -i '/linux \/kernel/s/ quiet\b//g' "$GRUB_CFG"
+      sudo sed -i "/linux \/kernel/{ /DEBUG=/! s|$| DEBUG=${DEBUG_LEVEL}|; }" "$GRUB_CFG"
+      log "Debug boot enabled (DEBUG=${DEBUG_LEVEL}) — type 'exit' at busybox prompt to continue"
+    fi
+    # --nomodeset: disable DRM/KMS, force software framebuffer
+    if $NOMODESET; then
+      sudo sed -i "/linux \/kernel/{ /nomodeset/! s|$| nomodeset|; }" "$GRUB_CFG"
+      log "nomodeset enabled — DRM/KMS disabled, using software framebuffer"
+    fi
     sudo sed -i '/linux \/kernel/{ /console=ttyS0/! s/$/ console=ttyS0,115200n8/; }' "$GRUB_CFG"
     log "GRUB linux line after patching:"
     sudo grep 'linux ' "$GRUB_CFG" | head -3
