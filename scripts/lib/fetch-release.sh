@@ -76,28 +76,47 @@ url_exists() {
   case "$code" in 200|206) return 0 ;; *) return 1 ;; esac
 }
 
-# ── Atom feed path (used for all --tag-prefix calls) ──────────────────────────
+# ── REST API tag-prefix lookup ─────────────────────────────────────────────────
 #
-# Reads the public releases Atom feed — no API token, no rate limit.
-# Finds the latest tag matching the prefix, then downloads assets directly.
+# Uses the GitHub REST API /releases?per_page=100 (paginated) to find the
+# newest release whose tag starts with <prefix>.  Falls back gracefully when
+# unauthenticated rate limits are hit; set GITHUB_TOKEN to raise the limit.
 
-atom_latest_tag() {
+api_latest_tag() {
   local prefix="$1"
-  curl -fsSL --max-time 30 \
-    "https://github.com/${OWNER_REPO}/releases.atom" 2>/dev/null \
-    | grep -o "releases/tag/${prefix}[^\"<]*" \
-    | head -1 \
-    | sed 's|releases/tag/||'
+  local auth_args=()
+  [ -n "${GITHUB_TOKEN:-}" ] && auth_args=(-H "Authorization: token ${GITHUB_TOKEN}")
+
+  local tag="" page=1
+  while true; do
+    local result
+    result=$(curl -fsSL --max-time 30 \
+      "${auth_args[@]}" \
+      -H "Accept: application/vnd.github.v3+json" \
+      "https://api.github.com/repos/${OWNER_REPO}/releases?per_page=100&page=${page}" \
+      2>/dev/null) || break
+
+    tag=$(printf '%s' "$result" | jq -r --arg p "$prefix" \
+      '[.[] | select(.tag_name | startswith($p))] | .[0].tag_name // empty' \
+      2>/dev/null || true)
+    [ -n "$tag" ] && { printf '%s' "$tag"; return 0; }
+
+    local count
+    count=$(printf '%s' "$result" | jq 'length' 2>/dev/null || echo 0)
+    [ "${count:-0}" -lt 100 ] && break
+    page=$(( page + 1 ))
+  done
+
+  return 1
 }
 
-fetch_via_atom() {
+fetch_via_api() {
   local prefix="$1" file_glob="$2" dest_dir="$3"
-  local file_base="${file_glob//\*/}"   # blissos14-gapps-arm.qcow2* → blissos14-gapps-arm.qcow2
+  local file_base="${file_glob//\*/}"   # blissos14-base.qcow2* → blissos14-base.qcow2
 
-  log "Looking up latest '${prefix}' release via Atom feed..."
+  log "Looking up latest '${prefix}' release via GitHub API..."
   local tag
-  tag=$(atom_latest_tag "$prefix") || true
-  if [ -z "$tag" ]; then
+  if ! tag=$(api_latest_tag "$prefix") || [ -z "$tag" ]; then
     die "No release found for prefix '${prefix}' in ${OWNER_REPO}.
   Make sure a '${prefix}YYYYMMDD-HHMM' release has been published:
   https://github.com/${OWNER_REPO}/releases"
@@ -185,9 +204,9 @@ fetch_via_atom() {
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-# --tag-prefix mode: Atom feed, no REST API involved
+# --tag-prefix mode: REST API filtered by prefix
 if [ -n "$TAG_PREFIX" ]; then
-  fetch_via_atom "$TAG_PREFIX" "$PATTERN" "$DEST_DIR"
+  fetch_via_api "$TAG_PREFIX" "$PATTERN" "$DEST_DIR"
   exit 0
 fi
 
