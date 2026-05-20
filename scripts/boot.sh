@@ -300,7 +300,6 @@ qemu-system-x86_64 \
   -m "${RAM_MB}" \
   "${HUGEPAGES_FLAGS[@]}" \
   -machine pc-q35-10.0,vmport=off \
-  -smbios type=1,manufacturer="Android-x86",product="Android-x86 9.0",version="9.0",family="Android-x86" \
   -drive "file=${IMG},if=virtio,index=0,${IMG_SNAPSHOT}" \
   -drive "file=${UDATA},if=virtio,index=1,snapshot=off" \
   "${GPU_FLAGS[@]}" \
