@@ -92,7 +92,15 @@ SUBCOMMANDS
       Check all dependencies, KVM, images, and disk space.
 
   profiles
-      List available device profiles and VM hardware profiles.
+      List available device profiles, VM hardware profiles, and generated XML files.
+
+  virt-manager [device-profile] [--vm-profile <name>] [--define] [--start]
+               [--ram <mb>] [--cores <n>] [--threads <n>] [--gpu <device>]
+               [--audio <device>] [--adb-port <n>] [--no-spice] [--output <path>]
+      Generate a libvirt XML domain definition for use with virt-manager.
+      --define   Register the domain with libvirt (virsh define).
+      --start    Start the domain immediately after defining (requires --define).
+      All hardware flags override the selected --vm-profile values.
 
 FLAGS (global)
   --debug    Enable bash -x trace mode
@@ -108,6 +116,9 @@ EXAMPLES
   android-vm update
   android-vm doctor
   android-vm profiles
+  android-vm virt-manager
+  android-vm virt-manager pixel7-ap1a --vm-profile performance --define --start
+  android-vm virt-manager --ram 6144 --cores 4 --no-spice
 USAGE
 }
 
@@ -430,7 +441,81 @@ cmd_profiles() {
     printf "  ${BLU}%-16s${NC} %sMB  %sc/%st  %s%b\n" \
       "$name" "$ram" "$cores" "$threads" "$desc" "$marker"
   done
+
+  printf "\n${DIM}━━━ virt-manager XML Files ━━━${NC}\n"
+  local found_xml=false
+  for f in "${ROOT}"/run/*.xml; do
+    [ -f "$f" ] || continue
+    found_xml=true
+    local xname
+    xname=$(basename "$f")
+    printf "  ${BLU}%-30s${NC} %s\n" "$xname" "$(realpath "$f")"
+  done
+  $found_xml || printf "  ${DIM}none — run: android-vm virt-manager [profile]${NC}\n"
   printf "\n"
+}
+
+# ── cmd_virt_manager ─────────────────────────────────────────────────────────
+cmd_virt_manager() {
+  local device_profile vm_profile define=false start_vm=false output_path=""
+  device_profile=$(default_device_profile)
+  vm_profile=$(default_vm_profile)
+
+  local gen_flags=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --vm-profile) vm_profile="$2";   shift 2 ;;
+      --define)     define=true;       shift   ;;
+      --start)      start_vm=true;     shift   ;;
+      --output)     output_path="$2";  gen_flags+=("$1" "$2"); shift 2 ;;
+      --debug)      shift ;;
+      --ram|--cores|--threads|--gpu|--audio|--adb-port)
+        gen_flags+=("$1" "$2"); shift 2 ;;
+      --no-spice)   gen_flags+=("$1"); shift ;;
+      -*) die "Unknown flag for virt-manager: $1" ;;
+      *)  device_profile="$1"; shift ;;
+    esac
+  done
+
+  [ -z "$output_path" ] && output_path="${ROOT}/run/${device_profile}.xml"
+
+  bash "${ROOT}/scripts/gen-libvirt-xml.sh" \
+    "$device_profile" \
+    --vm-profile "$vm_profile" \
+    "${gen_flags[@]}"
+
+  if $define; then
+    if command -v virsh &>/dev/null; then
+      log "Defining domain with virsh..."
+      virsh define "$output_path"
+      ok "Domain defined: android-${device_profile}"
+    else
+      warn "virsh not found — install libvirt-clients to use --define"
+      warn "Manual: virsh define ${output_path}"
+    fi
+  fi
+
+  if $start_vm; then
+    if ! $define; then
+      warn "--start requires --define (or a pre-existing domain)"
+    elif command -v virsh &>/dev/null; then
+      log "Starting domain..."
+      virsh start "android-${device_profile}"
+      ok "Domain started: android-${device_profile}"
+    else
+      warn "virsh not found — cannot start domain"
+    fi
+  fi
+
+  if ! $define && ! $start_vm; then
+    printf "\n"
+    log "XML written to: ${output_path}"
+    log "Import into virt-manager:"
+    log "  virsh define ${output_path}"
+    log "  virsh start android-${device_profile}"
+    log "  OR open virt-manager → File → New VM → Import existing disk image"
+    printf "\n"
+  fi
 }
 
 # ── cmd_status ────────────────────────────────────────────────────────────────
@@ -526,13 +611,14 @@ CMD="${1:-help}"
 shift || true
 
 case "$CMD" in
-  start)    cmd_start    "$@" ;;
-  stop)     cmd_stop     "$@" ;;
-  status)   cmd_status   "$@" ;;
-  reset)    cmd_reset    "$@" ;;
-  update)   cmd_update   "$@" ;;
-  doctor)   cmd_doctor   "$@" ;;
-  profiles) cmd_profiles "$@" ;;
+  start)        cmd_start        "$@" ;;
+  stop)         cmd_stop         "$@" ;;
+  status)       cmd_status       "$@" ;;
+  reset)        cmd_reset        "$@" ;;
+  update)       cmd_update       "$@" ;;
+  doctor)       cmd_doctor       "$@" ;;
+  profiles)     cmd_profiles     "$@" ;;
+  virt-manager) cmd_virt_manager "$@" ;;
   help|-h|--help) usage; exit 0 ;;
   --debug)  echo "Pass --debug after the subcommand, e.g.: android-vm start --debug"; exit 1 ;;
   *) die "Unknown subcommand: '${CMD}'. Run 'android-vm help' for usage." ;;

@@ -140,6 +140,39 @@ Install a VNC client: `sudo apt install tigervnc-viewer` or use Remmina, RealVNC
 | SPICE | `--spice` | 5900 | `virt-viewer` / `remote-viewer` | Performance, clipboard sharing |
 | VNC | `--vnc [n]` | 5900+n | Any VNC viewer | Maximum compatibility, SSH tunnels |
 
+## virt-manager / libvirt
+
+Generate a libvirt XML domain definition that can be imported into virt-manager or defined with `virsh`:
+
+```bash
+# Generate XML (no virsh required)
+android-vm virt-manager
+
+# Generate and immediately register with libvirt
+android-vm virt-manager --define
+
+# Generate, register, and start
+android-vm virt-manager pixel6a-bp1a --vm-profile performance --define --start
+
+# Override hardware settings
+android-vm virt-manager --ram 6144 --cores 4 --no-spice
+
+# Direct script usage with custom output path
+bash scripts/gen-libvirt-xml.sh pixel6a-bp1a --vm-profile balanced --output /tmp/android.xml
+```
+
+The XML is written to `run/<profile>.xml`. To import manually:
+
+```bash
+virsh define run/pixel6a-bp1a.xml
+virsh start android-pixel6a-bp1a
+# OR: open virt-manager → File → New VM → Import existing disk image
+```
+
+All hardware settings (`--ram`, `--cores`, `--threads`, `--gpu`, `--audio`, `--adb-port`) override the selected `--vm-profile` values. Use `--no-spice` to switch from SPICE (default) to VNC display.
+
+Install libvirt tools: `sudo apt install virt-manager libvirt-clients` (Ubuntu/Debian).
+
 ### Env var overrides (for the curl pipe case)
 
 | Env var | Flag equivalent | Description |
