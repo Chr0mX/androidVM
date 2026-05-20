@@ -241,7 +241,16 @@ fi
 OVMF_VARS_FLAGS=()
 if [ -n "$OVMF_VARS_TEMPLATE" ] && [ -f "$OVMF_VARS_TEMPLATE" ]; then
   OVMF_VARS="${ROOT}/run/${PROFILE_NAME}-vars.fd"
-  [ -f "$OVMF_VARS" ] || cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS"
+  if [ ! -f "$OVMF_VARS" ]; then
+    # Use an empty (zeroed) VARS file, not the distro template.
+    # The distro template contains host-specific NVRAM boot entries that all fail
+    # in the VM context, causing OVMF to fall through to the EFI Shell before
+    # trying the \EFI\BOOT\BOOTx64.EFI removable-media fallback where GRUB lives.
+    # An empty file triggers OVMF to initialise the store from scratch on first
+    # boot and run its own boot-device discovery, which finds GRUB correctly.
+    VARS_SIZE=$(stat -c%s "$OVMF_VARS_TEMPLATE")
+    dd if=/dev/zero of="$OVMF_VARS" bs="$VARS_SIZE" count=1 2>/dev/null
+  fi
   OVMF_VARS_FLAGS=(-drive "if=pflash,format=raw,file=${OVMF_VARS}")
 fi
 
