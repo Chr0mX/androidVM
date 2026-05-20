@@ -1,4 +1,4 @@
-name: Build Android 11 Base Images
+name: Build Android Base Images
 
 on:
   push:
@@ -22,6 +22,10 @@ on:
         default: true
       build_sakura:
         description: 'Build Project Sakura FOSS (sakura-foss.qcow2)'
+        type: boolean
+        default: true
+      build_bliss15:
+        description: 'Build BlissOS 15 FOSS (blissos15-foss-arm.qcow2)'
         type: boolean
         default: true
       force_rebuild:
@@ -84,9 +88,11 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             do_bliss14="${{ inputs.build_bliss14 }}"
             do_sakura="${{ inputs.build_sakura }}"
+            do_bliss15="${{ inputs.build_bliss15 }}"
           else
             do_bliss14="true"
             do_sakura="true"
+            do_bliss15="true"
           fi
 
           includes='[]'
@@ -131,6 +137,7 @@ jobs:
 
           [ "$do_bliss14" = "true" ] && add_distro bliss14
           [ "$do_sakura"  = "true" ] && add_distro sakura
+          [ "$do_bliss15" = "true" ] && add_distro bliss15
 
           matrix=$(echo "$includes" | jq -c '{include: .}')
           echo "matrix=${matrix}" >> $GITHUB_OUTPUT

@@ -1,0 +1,34 @@
+{
+  "name": "BlissOS 15",
+  "slug": "bliss15",
+  "android_version": 12,
+  "arch": "x86_64",
+  "base_image": "blissos15-foss-arm.qcow2",
+  "inject_gapps": false,
+
+  "source": {
+    "type": "sourceforge_latest",
+    "sf_path": "Official/BlissOS15/FOSS/Generic",
+    "sf_filter": ".iso"
+  },
+
+  "grub": {
+    "hwc": "drm_minigbm",
+    "gralloc": "minigbm",
+    "extra_params": [
+      "vt.global_cursor_default=0"
+    ]
+  },
+
+  "qemu": {
+    "preferred_gpu": "virtio-vga-gl",
+    "preferred_display": "gtk,gl=on",
+    "audio_device": "ich9-intel-hda"
+  },
+
+  "notes": [
+    "FOSS edition — no GApps, ARM translation pre-installed",
+    "Android 12 base",
+    "Same drm_minigbm + minigbm display stack as BlissOS 14"
+  ]
+}
