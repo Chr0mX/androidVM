@@ -448,7 +448,7 @@ jobs:
           sudo rmdir mnt/product mnt/system 2>/dev/null || true
 
       # ── Assemble bootable disk image ─────────────────────────────────────────
-      # GPT: p1=EFI vfat (rEFInd + kernel + initrd), p2=ext4 BlissOS data (system.img).
+      # GPT: p1=EFI vfat (GRUB + kernel + initrd), p2=ext4 Android data (system.img).
       # SRC= and DATA= are left empty here; set-profile.sh patches
       # them per-device when building a profile image.
       - name: Assemble bootable disk image

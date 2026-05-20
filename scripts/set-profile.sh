@@ -53,7 +53,7 @@ DISTRO_FILE="${ROOT}/androiddistro/${DISTRO_NAME}.json"
 OUT_IMG="${ROOT}/builds/android11-${PROFILE_NAME}-$(date +%Y%m%d).qcow2"
 LATEST_LINK="${ROOT}/builds/android11-${PROFILE_NAME}-latest.qcow2"
 
-# p1 = EFI FAT32 partition (holds rEFInd binary + refind.conf + kernel + initrd)
+# p1 = EFI FAT32 partition (holds GRUB binary + grub.cfg + kernel + initrd)
 MNT_EFI="${ROOT}/mnt/efi"
 # p2 = Android data partition (holds system.img, vendor.img, etc.)
 MNT_ANDROID="${ROOT}/mnt/android"
