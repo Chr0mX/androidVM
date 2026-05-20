@@ -129,6 +129,9 @@ case "$GPU" in
     ;;
 esac
 
+SECONDARY_GPU=$(jq -r '.secondary_gpu // empty' "$VM_PROFILE_FILE")
+[ -n "$SECONDARY_GPU" ] && GPU_FLAGS+=(-device "$SECONDARY_GPU")
+
 # ── Display flags ─────────────────────────────────────────────────────────────
 DISPLAY_FLAGS=()
 if $SPICE_MODE; then
