@@ -227,17 +227,19 @@ else
     log "Device spoofing disabled (device-spoof.json: enabled=false) — skipping prop patching"
   fi
 
-  # ── Patch rEFInd config ────────────────────────────────────────────────────
-  # refind.conf lives on the EFI FAT32 partition (p1)
+  # ── Patch bootloader config ───────────────────────────────────────────────
   REFIND_CFG="${MNT_EFI}/EFI/BOOT/refind.conf"
+  GRUB_CFG="${MNT_ANDROID}/boot/grub/grub.cfg"
+
   if [ -f "$REFIND_CFG" ]; then
+    # ── rEFInd image (new CI builds) ──────────────────────────────────────
     log "Patching rEFInd config: DATA=/dev/vdb + HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC} + console=ttyS0 ..."
-    # Set userdata partition — DATA= followed by " or space
+    # Set userdata partition — DATA= followed by closing " or a space
     sudo sed -i 's/DATA="/DATA=\/dev\/vdb"/g' "$REFIND_CFG"
     sudo sed -i 's/ DATA= / DATA=\/dev\/vdb /g' "$REFIND_CFG"
     # HWC + Gralloc — append before closing " on options line (idempotent)
     sudo sed -i "/^\s*options /{ /HWC=/! s|\"$| HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC}\"|; }" "$REFIND_CFG"
-    # Extra distro-specific kernel params (idempotent: skip if key already present)
+    # Extra distro-specific kernel params
     for param in "${DISTRO_EXTRA_PARAMS[@]}"; do
       key="${param%%=*}"
       sudo sed -i "/^\s*options /{ /${key}/! s|\"$| ${param}\"|; }" "$REFIND_CFG"
@@ -246,8 +248,25 @@ else
     sudo sed -i "/^\s*options /{ /console=ttyS0/! s|\"$| console=ttyS0,115200n8\"|; }" "$REFIND_CFG"
     log "rEFInd options after patching:"
     sudo grep 'options ' "$REFIND_CFG"
+
+  elif [ -f "$GRUB_CFG" ]; then
+    # ── GRUB image (images built before the rEFInd switch) ────────────────
+    log "Patching GRUB config (legacy image): DATA=/dev/vdb + HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC} + console=ttyS0 ..."
+    sudo sed -i 's/ DATA= / DATA=\/dev\/vdb /g' "$GRUB_CFG"
+    sudo sed -i 's/ DATA=$/ DATA=\/dev\/vdb/'   "$GRUB_CFG"
+    sudo sed -i "/linux \/kernel/{ /HWC=/! s|$| HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC}|; }" "$GRUB_CFG"
+    for param in "${DISTRO_EXTRA_PARAMS[@]}"; do
+      key="${param%%=*}"
+      sudo sed -i "/linux \/kernel/{ /${key}/! s|$| ${param}|; }" "$GRUB_CFG"
+    done
+    sudo sed -i '/linux \/kernel/{ /console=ttyS0/! s/$/ console=ttyS0,115200n8/; }' "$GRUB_CFG"
+    log "GRUB linux line after patching:"
+    sudo grep 'linux ' "$GRUB_CFG" | head -3
+    log "NOTE: this image uses GRUB — rebuild from CI to get rEFInd"
+
   else
-    log "WARNING: rEFInd config not found at ${REFIND_CFG} — userdata partition may not mount"
+    log "WARNING: no bootloader config found (checked rEFInd: ${REFIND_CFG}, GRUB: ${GRUB_CFG})"
+    log "         Kernel params (DATA=, HWC=, etc.) will NOT be set — VM may not boot correctly"
   fi
 
   # ── Cleanup via trap ──────────────────────────────────────────────────────
