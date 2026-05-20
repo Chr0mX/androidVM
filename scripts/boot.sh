@@ -210,9 +210,9 @@ ADB_PORT=$(jq -r '.adb_port // 5555' "$DEFAULTS_JSON" 2>/dev/null || echo "5555"
 OVMF_PATH=$(jq -r '.ovmf_path // empty' "$DEFAULTS_JSON" 2>/dev/null || true)
 if [ -z "$OVMF_PATH" ] || [ ! -f "$OVMF_PATH" ]; then
   for candidate in \
+      /usr/share/OVMF/OVMF_CODE_4M.fd \
       /usr/share/OVMF/OVMF_CODE.fd \
       /usr/share/ovmf/OVMF.fd \
-      /usr/share/OVMF/OVMF_CODE_4M.fd \
       /usr/share/OVMF/OVMF_4M.fd \
       /usr/share/qemu/OVMF.fd \
       /usr/share/edk2/ovmf/OVMF_CODE.fd; do
@@ -223,6 +223,27 @@ if [ -z "$OVMF_PATH" ] || [ ! -f "$OVMF_PATH" ]; then
   done
 fi
 [ -f "$OVMF_PATH" ] || die "OVMF firmware not found. Install it: sudo apt install ovmf"
+
+# Resolve writable VARS file (EFI variable store) — per-VM copy of the template
+OVMF_VARS_TEMPLATE=$(jq -r '.ovmf_vars_template // empty' "$DEFAULTS_JSON" 2>/dev/null || true)
+if [ -z "$OVMF_VARS_TEMPLATE" ] || [ ! -f "$OVMF_VARS_TEMPLATE" ]; then
+  for candidate in \
+      /usr/share/OVMF/OVMF_VARS_4M.fd \
+      /usr/share/OVMF/OVMF_VARS.fd \
+      /usr/share/ovmf/OVMF_VARS.fd \
+      /usr/share/edk2/ovmf/OVMF_VARS.fd; do
+    if [ -f "$candidate" ]; then
+      OVMF_VARS_TEMPLATE="$candidate"
+      break
+    fi
+  done
+fi
+OVMF_VARS_FLAGS=()
+if [ -n "$OVMF_VARS_TEMPLATE" ] && [ -f "$OVMF_VARS_TEMPLATE" ]; then
+  OVMF_VARS="${ROOT}/run/${PROFILE_NAME}-vars.fd"
+  [ -f "$OVMF_VARS" ] || cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS"
+  OVMF_VARS_FLAGS=(-drive "if=pflash,format=raw,file=${OVMF_VARS}")
+fi
 
 echo "[boot] Starting VM: profile=${PROFILE_NAME}  vm-profile=${VM_PROFILE_NAME}"
 echo "[boot] Resources:   ${CPU_CORES}c/${CPU_THREADS}t  ${RAM_MB}MB RAM"
@@ -249,6 +270,7 @@ qemu-system-x86_64 \
   -netdev "user,id=net0,hostfwd=tcp::${ADB_PORT}-:5555" \
   -device virtio-rng-pci \
   -drive "if=pflash,format=raw,readonly=on,file=${OVMF_PATH}" \
+  "${OVMF_VARS_FLAGS[@]}" \
   "${SERIAL_FLAGS[@]}" &
 
 QEMU_PID=$!

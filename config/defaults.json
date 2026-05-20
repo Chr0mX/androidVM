@@ -3,5 +3,6 @@
   "default_vm_profile": "balanced",
   "adb_port": 5555,
   "userdata_size": "8G",
-  "ovmf_path": "/usr/share/OVMF/OVMF_CODE.fd"
+  "ovmf_path": "/usr/share/OVMF/OVMF_CODE_4M.fd",
+  "ovmf_vars_template": "/usr/share/OVMF/OVMF_VARS_4M.fd"
 }
