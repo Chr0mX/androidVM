@@ -119,7 +119,7 @@ fi
 GPU_FLAGS=()
 case "$GPU" in
   virtio-vga-gl|virtio-vga)
-    GPU_FLAGS=(-device "${GPU},xres=1080,yres=1920")
+    GPU_FLAGS=(-device "${GPU},xres=1920,yres=1080")
     ;;
   VGA)
     GPU_FLAGS=(-vga std)
@@ -145,7 +145,7 @@ elif $VNC_MODE; then
   VNC_PORT=$(( 5900 + VNC_DISPLAY ))
   # egl-headless supplies the host GL context virgl needs without opening a window;
   # -vnc captures the rendered framebuffer for remote viewing.
-  GPU_FLAGS=(-device "virtio-vga-gl,xres=1080,yres=1920")
+  GPU_FLAGS=(-device "virtio-vga-gl,xres=1920,yres=1080")
   DISPLAY_FLAGS=(-display egl-headless -vnc ":${VNC_DISPLAY}")
   echo "[boot] VNC:         vnc://localhost:${VNC_PORT}  (display :${VNC_DISPLAY})"
 elif $HEADLESS; then
