@@ -353,10 +353,16 @@ sudo cp "${WORK}/system.raw" "${WORK}/mnt/android/system.img"
 [ -f "${WORK}/vendor.raw"  ] && sudo cp "${WORK}/vendor.raw"  "${WORK}/mnt/android/vendor.img"  || true
 [ -f "${WORK}/product.raw" ] && sudo cp "${WORK}/product.raw" "${WORK}/mnt/android/product.img" || true
 
-# Kernel + initrd go on the EFI partition so GRUB can load them (FAT32, no driver needed)
-[ -f "${WORK}/boot-kernel"      ] && sudo cp "${WORK}/boot-kernel"      "${WORK}/mnt/efi/kernel"     || true
-[ -f "${WORK}/boot-ramdisk.img" ] && sudo cp "${WORK}/boot-ramdisk.img" "${WORK}/mnt/efi/initrd.img" || true
-[ -f "${WORK}/boot-initrd.img"  ] && sudo cp "${WORK}/boot-initrd.img"  "${WORK}/mnt/efi/initrd.img" || true
+# Kernel + initrd go on the EFI partition (FAT32, always readable by GRUB) AND on the
+# android ext4 partition.  Android-x86-derived GRUB binaries typically search for the
+# partition containing system.img, root to it, and load kernel/initrd relative to that
+# root — so they must be present on both partitions to work regardless of prefix.
+[ -f "${WORK}/boot-kernel"      ] && sudo cp "${WORK}/boot-kernel"      "${WORK}/mnt/efi/kernel"         || true
+[ -f "${WORK}/boot-ramdisk.img" ] && sudo cp "${WORK}/boot-ramdisk.img" "${WORK}/mnt/efi/initrd.img"     || true
+[ -f "${WORK}/boot-initrd.img"  ] && sudo cp "${WORK}/boot-initrd.img"  "${WORK}/mnt/efi/initrd.img"     || true
+[ -f "${WORK}/boot-kernel"      ] && sudo cp "${WORK}/boot-kernel"      "${WORK}/mnt/android/kernel"     || true
+[ -f "${WORK}/boot-ramdisk.img" ] && sudo cp "${WORK}/boot-ramdisk.img" "${WORK}/mnt/android/initrd.img" || true
+[ -f "${WORK}/boot-initrd.img"  ] && sudo cp "${WORK}/boot-initrd.img"  "${WORK}/mnt/android/initrd.img" || true
 
 # Install GRUB EFI extracted from the ISO.
 # ISOs ship BOOTx64.EFI (shim) + grubx64.efi (the real GRUB binary).
@@ -366,13 +372,16 @@ GRUB_EFI=$(find "${WORK}/boot-efi/" -iname 'grubx64.efi' 2>/dev/null | head -1 |
 [ -f "$GRUB_EFI" ] || GRUB_EFI=$(find "${WORK}/boot-efi/" -iname 'bootx64.efi' 2>/dev/null | head -1 || true)
 [ -f "$GRUB_EFI" ] || die "GRUB EFI binary not found in ISO (expected boot-efi/BOOT/grubx64.efi)"
 
-sudo mkdir -p "${WORK}/mnt/efi/EFI/BOOT"
+sudo mkdir -p "${WORK}/mnt/efi/EFI/BOOT" "${WORK}/mnt/android/boot/grub"
 sudo cp "$GRUB_EFI" "${WORK}/mnt/efi/EFI/BOOT/BOOTx64.EFI"
-echo "GRUB EFI: $(basename "$GRUB_EFI") → EFI/BOOT/BOOTx64.EFI"
+log "GRUB EFI: $(basename "$GRUB_EFI") → EFI/BOOT/BOOTx64.EFI"
 
-# Write GRUB config — DATA= and HWC= left empty; set-profile.sh patches per-device
+# Write grub.cfg to BOTH partitions — DATA= and HWC= left empty; set-profile.sh patches
+# per-device.  EFI copy covers GRUB binaries with prefix=/EFI/BOOT; android copy covers
+# Android-x86-derived binaries whose embedded startup searches for system.img and then
+# loads /boot/grub/grub.cfg on that partition.
 DISTRO_DISPLAY_NAME=$(jq -r '.name' "$DISTRO_FILE")
-sudo tee "${WORK}/mnt/efi/EFI/BOOT/grub.cfg" > /dev/null <<GRUBCFG
+sudo tee "${WORK}/mnt/efi/EFI/BOOT/grub.cfg" "${WORK}/mnt/android/boot/grub/grub.cfg" > /dev/null <<GRUBCFG
 set default=0
 set timeout=3
 
