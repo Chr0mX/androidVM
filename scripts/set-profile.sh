@@ -35,7 +35,9 @@ DISTRO_FILE="${ROOT}/androiddistro/${DISTRO_NAME}.json"
 OUT_IMG="${ROOT}/builds/android11-${PROFILE_NAME}-$(date +%Y%m%d).qcow2"
 LATEST_LINK="${ROOT}/builds/android11-${PROFILE_NAME}-latest.qcow2"
 
-# p2 = Android data partition (holds system.img, kernel, grub.cfg, etc.)
+# p1 = EFI FAT32 partition (holds rEFInd binary + refind.conf + kernel + initrd)
+MNT_EFI="${ROOT}/mnt/efi"
+# p2 = Android data partition (holds system.img, vendor.img, etc.)
 MNT_ANDROID="${ROOT}/mnt/android"
 # Loop-mounted from system.img on p2
 MNT_SYSTEM="${ROOT}/mnt/system"
@@ -104,8 +106,9 @@ else
   sudo qemu-nbd --connect=/dev/nbd0 "$OUT_IMG"
   sleep 2
 
-  mkdir -p "$MNT_ANDROID" "$MNT_SYSTEM" "$MNT_VENDOR" "$MNT_PRODUCT"
+  mkdir -p "$MNT_EFI" "$MNT_ANDROID" "$MNT_SYSTEM" "$MNT_VENDOR" "$MNT_PRODUCT"
 
+  EFI_MOUNTED=false
   SYSTEM_IMG_MOUNTED=false
   VENDOR_IMG_MOUNTED=false
   PRODUCT_IMG_MOUNTED=false
@@ -116,6 +119,7 @@ else
     $VENDOR_IMG_MOUNTED  && sudo umount "$MNT_VENDOR"  2>/dev/null || true
     $SYSTEM_IMG_MOUNTED  && sudo umount "$MNT_SYSTEM"  2>/dev/null || true
     sudo umount "$MNT_ANDROID" 2>/dev/null || true
+    $EFI_MOUNTED         && sudo umount "$MNT_EFI"     2>/dev/null || true
     sudo qemu-nbd --disconnect /dev/nbd0 2>/dev/null || true
   }
   trap cleanup EXIT
@@ -123,7 +127,11 @@ else
   log "Partition layout:"
   lsblk /dev/nbd0
 
-  # p2 = Android data partition (contains system.img, grub.cfg, kernel, etc.)
+  # p1 = EFI FAT32 partition (rEFInd binary + refind.conf + kernel + initrd)
+  sudo mount /dev/nbd0p1 "$MNT_EFI"
+  EFI_MOUNTED=true
+
+  # p2 = Android data partition (system.img, vendor.img, etc.)
   sudo mount /dev/nbd0p2 "$MNT_ANDROID"
 
   # Loop-mount the inner system.img to reach the actual Android system files
@@ -219,27 +227,27 @@ else
     log "Device spoofing disabled (device-spoof.json: enabled=false) — skipping prop patching"
   fi
 
-  # ── Patch GRUB config ─────────────────────────────────────────────────────
-  # grub.cfg lives on the Android data partition (p2), not inside system.img
-  GRUB_CFG="${MNT_ANDROID}/boot/grub/grub.cfg"
-  if [ -f "$GRUB_CFG" ]; then
-    log "Patching GRUB config: DATA=/dev/vdb + HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC} + console=ttyS0 ..."
-    # Set userdata partition (handles both "DATA= " and "DATA=<eol>" forms)
-    sudo sed -i 's/ DATA= / DATA=\/dev\/vdb /g' "$GRUB_CFG"
-    sudo sed -i 's/ DATA=$/ DATA=\/dev\/vdb/' "$GRUB_CFG"
-    # HWComposer + Gralloc HAL — values from androiddistro/${DISTRO_NAME}.json
-    sudo sed -i "/linux \/kernel/{ /HWC=/! s|$| HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC}|; }" "$GRUB_CFG"
+  # ── Patch rEFInd config ────────────────────────────────────────────────────
+  # refind.conf lives on the EFI FAT32 partition (p1)
+  REFIND_CFG="${MNT_EFI}/EFI/BOOT/refind.conf"
+  if [ -f "$REFIND_CFG" ]; then
+    log "Patching rEFInd config: DATA=/dev/vdb + HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC} + console=ttyS0 ..."
+    # Set userdata partition — DATA= followed by " or space
+    sudo sed -i 's/DATA="/DATA=\/dev\/vdb"/g' "$REFIND_CFG"
+    sudo sed -i 's/ DATA= / DATA=\/dev\/vdb /g' "$REFIND_CFG"
+    # HWC + Gralloc — append before closing " on options line (idempotent)
+    sudo sed -i "/^\s*options /{ /HWC=/! s|\"$| HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC}\"|; }" "$REFIND_CFG"
     # Extra distro-specific kernel params (idempotent: skip if key already present)
     for param in "${DISTRO_EXTRA_PARAMS[@]}"; do
       key="${param%%=*}"
-      sudo sed -i "/linux \/kernel/{ /${key}/! s|$| ${param}|; }" "$GRUB_CFG"
+      sudo sed -i "/^\s*options /{ /${key}/! s|\"$| ${param}\"|; }" "$REFIND_CFG"
     done
-    # Add serial console so kernel/init messages are visible in serial log
-    sudo sed -i '/linux \/kernel/{ /console=ttyS0/! s/$/ console=ttyS0,115200n8/; }' "$GRUB_CFG"
-    log "GRUB config after patching:"
-    sudo grep 'linux ' "$GRUB_CFG" | head -5
+    # Serial console for serial log visibility
+    sudo sed -i "/^\s*options /{ /console=ttyS0/! s|\"$| console=ttyS0,115200n8\"|; }" "$REFIND_CFG"
+    log "rEFInd options after patching:"
+    sudo grep 'options ' "$REFIND_CFG"
   else
-    log "WARNING: GRUB config not found at ${GRUB_CFG} — userdata partition may not mount"
+    log "WARNING: rEFInd config not found at ${REFIND_CFG} — userdata partition may not mount"
   fi
 
   # ── Cleanup via trap ──────────────────────────────────────────────────────

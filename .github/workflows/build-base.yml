@@ -209,7 +209,7 @@ jobs:
             android-tools-adb simg2img \
             e2fsprogs python3 python3-pip jq curl rsync \
             ovmf p7zip-full lzip unzip squashfs-tools \
-            grub-efi-amd64-bin parted
+            parted
           pip3 install jsonschema --quiet
 
       - name: Detect execution environment
@@ -456,6 +456,14 @@ jobs:
       - name: Assemble bootable disk image
         if: steps.plan.outputs.build == 'true'
         run: |
+          # Fetch rEFInd binary without triggering its post-install boot-setup script
+          cd /tmp
+          apt-get download refind 2>/dev/null
+          dpkg -x /tmp/refind_*.deb /tmp/refind-pkg/
+          cd $GITHUB_WORKSPACE
+          REFIND_BIN="/tmp/refind-pkg/usr/share/refind/refind_x64.efi"
+          [ -f "$REFIND_BIN" ] || { echo "::error::rEFInd x64 binary not found after dpkg -x"; exit 1; }
+
           SYSTEM_SZ=$(stat -c%s work/system.raw)
           VENDOR_SZ=$([ -f work/vendor.raw  ] && stat -c%s work/vendor.raw  || echo 0)
           PRODUCT_SZ=$([ -f work/product.raw ] && stat -c%s work/product.raw || echo 0)
@@ -479,30 +487,34 @@ jobs:
           sudo mkdir -p mnt/efi mnt/android
           sudo mount "${LOOP}p1" mnt/efi
           sudo mount "${LOOP}p2" mnt/android
+
+          # System / vendor / product images on data partition (p2)
           sudo cp work/system.raw  mnt/android/system.img
           [ -f work/vendor.raw  ] && sudo cp work/vendor.raw  mnt/android/vendor.img  || true
           [ -f work/product.raw ] && sudo cp work/product.raw mnt/android/product.img || true
-          [ -f work/boot-kernel ]        && sudo cp work/boot-kernel        mnt/android/kernel       || true
-          [ -f work/boot-ramdisk.img ]   && sudo cp work/boot-ramdisk.img   mnt/android/ramdisk.img  || true
-          [ -f work/boot-initrd.img ]    && sudo cp work/boot-initrd.img    mnt/android/initrd.img   || true
-          sudo grub-install \
-            --target=x86_64-efi \
-            --efi-directory=mnt/efi \
-            --boot-directory=mnt/android/boot \
-            --removable \
-            --no-nvram
-          sudo mkdir -p mnt/android/boot/grub
+
+          # Kernel + initrd on EFI partition (p1) — rEFInd reads FAT32 natively
+          [ -f work/boot-kernel      ] && sudo cp work/boot-kernel      mnt/efi/kernel     || true
+          [ -f work/boot-ramdisk.img ] && sudo cp work/boot-ramdisk.img mnt/efi/initrd.img || true
+          [ -f work/boot-initrd.img  ] && sudo cp work/boot-initrd.img  mnt/efi/initrd.img || true
+
+          # Install rEFInd as the EFI fallback boot entry
+          sudo mkdir -p mnt/efi/EFI/BOOT
+          sudo cp "$REFIND_BIN" mnt/efi/EFI/BOOT/BOOTx64.EFI
+
+          # Write rEFInd config — DATA= and HWC= left empty; set-profile.sh patches per-device
           DISTRO_NAME=$(jq -r '.name' androiddistro/${{ matrix.distro }}.json)
-          sudo tee mnt/android/boot/grub/grub.cfg > /dev/null << GRUBCFG
-          set default=0
-          set timeout=3
+          sudo tee mnt/efi/EFI/BOOT/refind.conf > /dev/null << REFINDCFG
+          timeout 3
+          default_selection 1
 
           menuentry "${DISTRO_NAME}" {
-            search --set=root --label Android
-            linux /kernel root=/dev/ram0 androidboot.hardware=android_x86_64 androidboot.selinux=permissive SRC= DATA=
-            initrd /initrd.img
+              loader /kernel
+              initrd /initrd.img
+              options "root=/dev/ram0 androidboot.hardware=android_x86_64 androidboot.selinux=permissive SRC= DATA="
           }
-          GRUBCFG
+          REFINDCFG
+
           sudo umount mnt/efi mnt/android
           sudo rmdir  mnt/efi mnt/android
           sudo losetup -d "$LOOP"
@@ -724,6 +736,29 @@ jobs:
           else
             echo "=== ARM translation: disabled for ${{ matrix.distro }} — skipping checks ==="
           fi
+
+          echo "=== rEFInd bootloader ==="
+          sudo mkdir -p mnt/efi
+          sudo mount /dev/nbd0p1 mnt/efi
+          if sudo test -f mnt/efi/EFI/BOOT/BOOTx64.EFI; then
+            echo "  ✓ mnt/efi/EFI/BOOT/BOOTx64.EFI (rEFInd binary)"
+          else
+            echo "  ✗ MISSING: mnt/efi/EFI/BOOT/BOOTx64.EFI"
+            FAIL=$((FAIL+1))
+          fi
+          if sudo test -f mnt/efi/EFI/BOOT/refind.conf; then
+            echo "  ✓ mnt/efi/EFI/BOOT/refind.conf"
+          else
+            echo "  ✗ MISSING: mnt/efi/EFI/BOOT/refind.conf"
+            FAIL=$((FAIL+1))
+          fi
+          if sudo test -f mnt/efi/kernel; then
+            echo "  ✓ mnt/efi/kernel"
+          else
+            echo "  ⚠ mnt/efi/kernel absent — GRUB-style kernel on data partition?"
+          fi
+          sudo umount mnt/efi 2>/dev/null || true
+          sudo rmdir mnt/efi 2>/dev/null || true
 
           $HAS_VENDOR_IMG && sudo umount mnt/vendor 2>/dev/null || true
           sudo umount mnt/system mnt/android 2>/dev/null || true
