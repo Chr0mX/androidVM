@@ -333,11 +333,15 @@ jobs:
             rm -f "$src"; file "$dst"
           done
 
-      - name: Resize system image to accommodate GApps
-        if: steps.plan.outputs.build == 'true' && matrix.inject_gapps == 'true'
+      - name: Resize system image to accommodate injections
+        if: steps.plan.outputs.build == 'true'
         run: |
           e2fsck -yf work/system.raw || true
-          truncate -s +600M work/system.raw
+          # ARM translation always injected (~100 MB); GApps adds ~600 MB on top
+          EXTRA_MB=200
+          [ "${{ matrix.inject_gapps }}" = "true" ] && EXTRA_MB=$(( EXTRA_MB + 600 ))
+          echo "Expanding system.raw by ${EXTRA_MB} MB"
+          truncate -s +${EXTRA_MB}M work/system.raw
           resize2fs work/system.raw
           e2fsck -yf work/system.raw || true
 
