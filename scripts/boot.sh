@@ -146,11 +146,26 @@ if $SPICE_MODE; then
   GPU_FLAGS=()   # SPICE manages its own rendering
 elif $VNC_MODE; then
   VNC_PORT=$(( 5900 + VNC_DISPLAY ))
-  # Use the profile's display backend (gtk,gl=on) for the GL context virtio-vga-gl needs;
-  # -vnc mirrors the same framebuffer for remote access.
-  GPU_FLAGS=(-device "virtio-vga-gl,xres=1920,yres=1080")
-  DISPLAY_FLAGS=(-display "$DISPLAY_CFG" -vnc ":${VNC_DISPLAY}")
   echo "[boot] VNC:         vnc://localhost:${VNC_PORT}  (display :${VNC_DISPLAY})"
+  # virtio-vga-gl requires a host GL context. egl-headless provides it without a window
+  # but needs a DRM render node. Try loading vkms (software DRM) if none is present.
+  RENDER_NODE=$(ls /dev/dri/renderD* 2>/dev/null | head -1 || true)
+  if [ -z "$RENDER_NODE" ]; then
+    echo "[boot] No DRM render node — loading vkms (software renderer) ..."
+    sudo modprobe vkms 2>/dev/null || true
+    sleep 1
+    RENDER_NODE=$(ls /dev/dri/renderD* 2>/dev/null | head -1 || true)
+  fi
+  if [ -n "$RENDER_NODE" ]; then
+    GPU_FLAGS=(-device "virtio-vga-gl,xres=1920,yres=1080")
+    DISPLAY_FLAGS=(-display egl-headless -vnc ":${VNC_DISPLAY}")
+    echo "[boot] VNC GL:      egl-headless via ${RENDER_NODE}"
+  else
+    echo "[boot] ERROR: VNC mode requires a DRM render node for GL." >&2
+    echo "[boot]        Run: sudo modprobe vkms   (no GPU needed)" >&2
+    echo "[boot]        Or use --headless for serial-log-only mode." >&2
+    exit 1
+  fi
 elif $HEADLESS; then
   DISPLAY_FLAGS=(-display none)
 else
