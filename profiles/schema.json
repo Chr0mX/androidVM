@@ -15,12 +15,6 @@
     },
     "system": {
       "type": "object",
-      "required": [
-        "ro.product.manufacturer", "ro.product.model",
-        "ro.product.name", "ro.product.device",
-        "ro.build.fingerprint", "ro.build.description",
-        "ro.build.tags", "ro.build.type"
-      ],
       "properties": {
         "ro.product.manufacturer":        { "type": "string" },
         "ro.product.model":               { "type": "string" },
@@ -49,11 +43,6 @@
     },
     "vendor": {
       "type": "object",
-      "required": [
-        "ro.product.vendor.manufacturer", "ro.product.vendor.model",
-        "ro.product.vendor.name", "ro.product.vendor.device",
-        "ro.vendor.build.fingerprint"
-      ],
       "properties": {
         "ro.product.vendor.manufacturer":  { "type": "string" },
         "ro.product.vendor.model":         { "type": "string" },

@@ -1,0 +1,9 @@
+{
+  "meta": {
+    "id": "generic",
+    "description": "Generic Android x86 — no prop overrides, stock device identity",
+    "created": "2026-05-20"
+  },
+  "system": {},
+  "vendor": {}
+}

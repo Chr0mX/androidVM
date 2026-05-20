@@ -1,5 +1,5 @@
 {
-  "default_device_profile": "pixel6a-bp1a",
+  "default_device_profile": "generic",
   "default_vm_profile": "balanced",
   "adb_port": 5555,
   "userdata_size": "8G",

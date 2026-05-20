@@ -1,6 +1,6 @@
 {
   "enabled": true,
-  "default_profile": "pixel6a-bp1a",
+  "default_profile": "generic",
   "patch_partitions": ["system", "vendor", "product"],
   "verify_after_build": false,
   "leak_scan_tokens": [
