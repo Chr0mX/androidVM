@@ -111,15 +111,26 @@ UDATA="${ROOT}/userdata/userdata-${PROFILE_NAME}.qcow2"
     fi
   fi
 
-  echo "[boot] Pre-formatting userdata as ${UDATA_FS}..."
-  UDATA_NBD="/dev/nbd1"
-  sudo qemu-nbd -c "$UDATA_NBD" "$UDATA"
-  sleep 1
-  case "$UDATA_FS" in
-    f2fs) sudo mkfs.f2fs -f "$UDATA_NBD" ;;
-    *)    sudo mkfs.ext4 -F "$UDATA_NBD" ;;
-  esac
-  sudo qemu-nbd -d "$UDATA_NBD"
+  if command -v qemu-nbd &>/dev/null; then
+    echo "[boot] Pre-formatting userdata as ${UDATA_FS}..."
+    UDATA_NBD="/dev/nbd1"
+    sudo qemu-nbd -c "$UDATA_NBD" "$UDATA"
+    sleep 1
+    case "$UDATA_FS" in
+      f2fs)
+        if command -v mkfs.f2fs &>/dev/null; then
+          sudo mkfs.f2fs -f "$UDATA_NBD"
+        else
+          echo "[boot] WARNING: mkfs.f2fs not found — pre-formatting as ext4 instead"
+          sudo mkfs.ext4 -F "$UDATA_NBD"
+        fi
+        ;;
+      *) sudo mkfs.ext4 -F "$UDATA_NBD" ;;
+    esac
+    sudo qemu-nbd -d "$UDATA_NBD"
+  else
+    echo "[boot] NOTE: qemu-nbd not available — skipping userdata pre-format (Android init will format on first boot)"
+  fi
 }
 
 # ── KVM flags ─────────────────────────────────────────────────────────────────
