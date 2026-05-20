@@ -193,6 +193,20 @@ sudo apt install qemu-system-x86 qemu-utils qemu-kvm android-tools-adb \
 pip3 install jsonschema
 ```
 
+## UEFI Firmware (OVMF)
+
+The VM boots via UEFI and needs OVMF firmware. `scripts/boot.sh` resolves it in
+two steps:
+
+1. **Config first** — `ovmf_path` and `ovmf_vars_template` from
+   `config/defaults.json` are used when set and the file exists.
+2. **Fallback scan** — otherwise `boot.sh` scans a built-in list of common
+   package locations (`/usr/share/OVMF/…`, `/usr/share/ovmf/…`,
+   `/usr/share/edk2/…`).
+
+To pin a specific firmware, set the two paths in `config/defaults.json` — that
+is the supported override.
+
 ## Workspace Layout
 
 ```
@@ -357,9 +371,18 @@ The CI workflow (`build-base.yml`) builds both distros in parallel and publishes
 | Field | Default | Effect |
 |---|---|---|
 | `enabled` | `true` | Master toggle — set `false` to skip all prop patching |
+| `default_profile` | `generic` | Default device profile when none is given on the CLI |
 | `patch_partitions` | `["system","vendor","product"]` | Which partitions to patch |
 | `verify_after_build` | `false` | Auto-run `verify.sh` after every `set-profile.sh` build |
 | `leak_scan_tokens` | `["generic_x86",…]` | Tokens `verify.sh` searches for in `getprop` output |
+
+**Default device profile precedence.** When no profile is named on the command
+line, `android-vm` resolves the default device profile in this order:
+
+1. `config/device-spoof.json` → `default_profile` (if set)
+2. `config/defaults.json` → `default_device_profile`
+
+`android-vm doctor` prints the effective default and which file supplied it.
 
 ## CI
 

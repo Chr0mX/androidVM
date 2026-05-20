@@ -4,12 +4,14 @@
 # Usage: android-vm <subcommand> [args] [--debug]
 #
 # Subcommands:
-#   start [device-profile] [--vm-profile <name>]
-#   stop  [device-profile]
-#   reset [device-profile]
+#   start        [device-profile] [--vm-profile <name>]
+#   stop         [device-profile]
+#   status       [device-profile]
+#   reset        [device-profile]
 #   update
 #   doctor
 #   profiles
+#   virt-manager [device-profile] [--define] [--start] [...]
 set -euo pipefail
 
 # Resolve real path so symlinks from /usr/local/bin work correctly
@@ -62,6 +64,17 @@ default_device_profile() {
 
 default_vm_profile() {
   cfg_get '.default_vm_profile' "balanced"
+}
+
+# Report which config file supplies the effective default device profile.
+default_profile_source() {
+  if [ -n "$(spoof_get '.default_profile' '')" ]; then
+    echo "config/device-spoof.json"
+  elif [ -n "$(cfg_get '.default_device_profile' '')" ]; then
+    echo "config/defaults.json"
+  else
+    echo "built-in fallback"
+  fi
 }
 
 # ── Usage ─────────────────────────────────────────────────────────────────────
@@ -124,7 +137,7 @@ USAGE
 
 # ── cmd_start ─────────────────────────────────────────────────────────────────
 cmd_start() {
-  local device_profile vm_profile
+  local device_profile vm_profile explicit_profile=false
   device_profile=$(default_device_profile)
   vm_profile=$(default_vm_profile)
 
@@ -144,9 +157,13 @@ cmd_start() {
         fi
         ;;
       -*) die "Unknown flag for start: $1 (boot flags: --vnc, --spice, --headless, --no-kvm, --snapshot)" ;;
-      *)  device_profile="$1"; shift ;;
+      *)  device_profile="$1"; explicit_profile=true; shift ;;
     esac
   done
+
+  if ! $explicit_profile; then
+    log "No device profile specified — using default '${device_profile}' (source: $(default_profile_source))"
+  fi
 
   local pid_file="${ROOT}/run/${device_profile}.pid"
   mkdir -p "${ROOT}/run"
@@ -374,6 +391,7 @@ cmd_doctor() {
   else
     check_warn "VM profiles: only ${vp_count} found (expected 4)"
   fi
+  check_ok "Default device profile: $(default_device_profile)  (source: $(default_profile_source))"
 
   printf "\n${DIM}━━━ Disk Space ━━━${NC}\n"
   local avail_gb

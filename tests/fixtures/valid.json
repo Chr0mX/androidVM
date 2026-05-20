@@ -1,0 +1,31 @@
+{
+  "meta": {
+    "id": "test-valid",
+    "description": "Validation fixture — passes schema and validator (incl. product partition)",
+    "created": "2026-05-20"
+  },
+  "system": {
+    "ro.product.manufacturer": "Google",
+    "ro.product.model": "Pixel 6a",
+    "ro.product.name": "bluejay",
+    "ro.product.device": "bluejay",
+    "ro.build.fingerprint": "google/bluejay/bluejay:13/BP1A.240905.003/12231197:user/release-keys",
+    "ro.build.description": "bluejay-user 13 BP1A.240905.003 12231197 release-keys",
+    "ro.build.tags": "release-keys",
+    "ro.build.type": "user"
+  },
+  "vendor": {
+    "ro.product.vendor.manufacturer": "Google",
+    "ro.product.vendor.model": "Pixel 6a",
+    "ro.product.vendor.name": "bluejay",
+    "ro.product.vendor.device": "bluejay",
+    "ro.vendor.build.fingerprint": "google/bluejay/bluejay:13/BP1A.240905.003/12231197:user/release-keys"
+  },
+  "product": {
+    "ro.product.product.manufacturer": "Google",
+    "ro.product.product.model": "Pixel 6a",
+    "ro.product.product.name": "bluejay",
+    "ro.product.product.device": "bluejay",
+    "ro.product.product.brand": "google"
+  }
+}

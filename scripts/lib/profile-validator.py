@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Validate a profile JSON file against profiles/schema.json.
-Also enforces prohibited key checks not expressible in JSON Schema.
+Adds fingerprint-consistency checks and friendlier prohibited-key errors
+on top of the schema (the schema also encodes the prohibited-key rules).
 
 Usage: profile-validator.py <profile.json>
 """
@@ -14,6 +15,7 @@ try:
 except ImportError:
     sys.exit("jsonschema not installed — run: pip3 install jsonschema")
 
+# Keep in sync with the propertyNames prohibition pattern in profiles/schema.json
 PROHIBITED_PREFIXES = ("ro.secure", "ro.debuggable", "ro.boot.", "persist.", "settings.secure.")
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 SCHEMA_PATH = SCRIPT_DIR.parent.parent / "profiles" / "schema.json"
@@ -21,11 +23,13 @@ SCHEMA_PATH = SCRIPT_DIR.parent.parent / "profiles" / "schema.json"
 
 def check_prohibited(profile: dict) -> list[str]:
     errors = []
-    for partition in ("system", "vendor"):
+    for partition in ("system", "vendor", "product"):
         for key in profile.get(partition, {}):
             for prefix in PROHIBITED_PREFIXES:
                 if key == prefix or key.startswith(prefix):
-                    errors.append(f"Prohibited key in '{partition}': {key}")
+                    errors.append(
+                        f"Prohibited key in '{partition}': {key} (matches prefix '{prefix}')"
+                    )
     return errors
 
 

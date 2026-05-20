@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema",
+  "$comment": "The propertyNames prohibition pattern in system/vendor/product must stay in sync with PROHIBITED_PREFIXES in scripts/lib/profile-validator.py",
   "type": "object",
   "required": ["meta", "system", "vendor"],
   "properties": {
@@ -33,12 +34,8 @@
         "ro.product.system.brand":        { "type": "string" }
       },
       "additionalProperties": { "type": "string" },
-      "not": {
-        "anyOf": [
-          { "required": ["ro.secure"] },
-          { "required": ["ro.debuggable"] },
-          { "required": ["ro.boot.hardware"] }
-        ]
+      "propertyNames": {
+        "not": { "pattern": "^(ro\\.secure|ro\\.debuggable|ro\\.boot\\.|persist\\.|settings\\.secure\\.)" }
       }
     },
     "vendor": {
@@ -51,7 +48,24 @@
         "ro.product.vendor.brand":         { "type": "string" },
         "ro.vendor.build.fingerprint":     { "type": "string" }
       },
-      "additionalProperties": { "type": "string" }
+      "additionalProperties": { "type": "string" },
+      "propertyNames": {
+        "not": { "pattern": "^(ro\\.secure|ro\\.debuggable|ro\\.boot\\.|persist\\.|settings\\.secure\\.)" }
+      }
+    },
+    "product": {
+      "type": "object",
+      "properties": {
+        "ro.product.product.manufacturer": { "type": "string" },
+        "ro.product.product.model":        { "type": "string" },
+        "ro.product.product.name":         { "type": "string" },
+        "ro.product.product.device":       { "type": "string" },
+        "ro.product.product.brand":        { "type": "string" }
+      },
+      "additionalProperties": { "type": "string" },
+      "propertyNames": {
+        "not": { "pattern": "^(ro\\.secure|ro\\.debuggable|ro\\.boot\\.|persist\\.|settings\\.secure\\.)" }
+      }
     }
   },
   "additionalProperties": false

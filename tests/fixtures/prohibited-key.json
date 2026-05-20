@@ -1,0 +1,13 @@
+{
+  "meta": {
+    "id": "test-prohibited-key",
+    "description": "Validation fixture — contains a prohibited key, must fail validation",
+    "created": "2026-05-20"
+  },
+  "system": {
+    "ro.product.manufacturer": "Google",
+    "ro.product.model": "Pixel 6a",
+    "persist.sys.test": "1"
+  },
+  "vendor": {}
+}

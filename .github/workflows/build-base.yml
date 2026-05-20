@@ -156,6 +156,9 @@ jobs:
             python3 scripts/lib/profile-validator.py "$f"
           done
 
+      - name: Run validation consistency tests
+        run: bash tests/run-validation-tests.sh
+
   # ─── Job 2: build (one run per distro via matrix) ─────────────────────────
   #
   # Runs on standard GitHub-hosted ubuntu-22.04 runners. KVM is NOT required
