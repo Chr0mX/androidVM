@@ -15,9 +15,10 @@
 
   "grub": {
     "hwc": "drm_minigbm",
-    "gralloc": "minigbm",
+    "gralloc": "minigbm_arcvm",
     "extra_params": [
-      "vt.global_cursor_default=0"
+      "vt.global_cursor_default=0",
+      "quiet"
     ]
   },
 
@@ -29,6 +30,6 @@
 
   "notes": [
     "Pure base image — no GApps, no ARM translation",
-    "drm_minigbm + minigbm: compatible with VNC (no host GL context required)"
+    "drm_minigbm + minigbm_arcvm: Virgl SW-FFMPEG profile (pc-q35-10.0)"
   ]
 }
