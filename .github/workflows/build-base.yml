@@ -458,11 +458,13 @@ jobs:
         run: |
           # Fetch rEFInd binary without triggering its post-install boot-setup script
           cd /tmp
-          apt-get download refind 2>/dev/null
+          apt-get download refind
           dpkg -x /tmp/refind_*.deb /tmp/refind-pkg/
           cd $GITHUB_WORKSPACE
-          REFIND_BIN="/tmp/refind-pkg/usr/share/refind/refind_x64.efi"
-          [ -f "$REFIND_BIN" ] || { echo "::error::rEFInd x64 binary not found after dpkg -x"; exit 1; }
+          # Use find — Ubuntu 22.04 puts it in refind/refind/refind_x64.efi (extra subdir)
+          REFIND_BIN=$(find /tmp/refind-pkg -name 'refind_x64.efi' 2>/dev/null | head -1)
+          echo "rEFInd binary: ${REFIND_BIN:-NOT FOUND}"
+          [ -f "$REFIND_BIN" ] || { echo "::error::refind_x64.efi not found in package"; exit 1; }
 
           SYSTEM_SZ=$(stat -c%s work/system.raw)
           VENDOR_SZ=$([ -f work/vendor.raw  ] && stat -c%s work/vendor.raw  || echo 0)
