@@ -319,7 +319,7 @@ log "Unmounting partition images..."
 sudo umount "${WORK}/mnt/product" 2>/dev/null || true
 sudo umount "${WORK}/mnt/system"  2>/dev/null || true
 
-# ── Assemble bootable disk (GPT: EFI p1 + ext4 Android data p2) ───────────────
+# ── Assemble bootable disk (GPT: EFI vfat p1 + ext4 BlissOS data p2) ─────────
 log "Assembling bootable disk image..."
 SYSTEM_SZ=$( stat -c%s "${WORK}/system.raw")
 VENDOR_SZ=$([ -f "${WORK}/vendor.raw"  ] && stat -c%s "${WORK}/vendor.raw"  || echo 0)
@@ -342,8 +342,8 @@ LOOP_DEV=$(sudo losetup --find --show --partscan "${WORK}/disk.raw")
 log "Loop device: ${LOOP_DEV}"
 sleep 1
 
-sudo mkfs.fat -F32 -n EFI    "${LOOP_DEV}p1"
-sudo mkfs.ext4 -L Android    "${LOOP_DEV}p2"
+sudo mkfs.vfat -n EFI        "${LOOP_DEV}p1"
+sudo mkfs.ext4 -L BlissOS   "${LOOP_DEV}p2"
 
 mkdir -p "${WORK}/mnt/efi" "${WORK}/mnt/android"
 sudo mount "${LOOP_DEV}p1" "${WORK}/mnt/efi"
