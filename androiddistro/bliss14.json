@@ -14,8 +14,8 @@
   },
 
   "grub": {
-    "hwc": "drm_minigbm",
-    "gralloc": "minigbm_arcvm",
+    "hwc": "drm",
+    "gralloc": "gbm",
     "extra_params": [
       "vt.global_cursor_default=0",
       "quiet"
@@ -24,12 +24,12 @@
 
   "qemu": {
     "preferred_gpu": "virtio-vga",
-    "preferred_display": "gtk,gl=on",
+    "preferred_display": "gtk,gl=off",
     "audio_device": "ich9-intel-hda"
   },
 
   "notes": [
     "Pure base image — no GApps, no ARM translation",
-    "drm_minigbm + minigbm_arcvm: Virgl SW-FFMPEG profile (pc-q35-10.0)"
+    "HWC=drm + GRALLOC=gbm: standard DRM/GBM path, no virgl required"
   ]
 }

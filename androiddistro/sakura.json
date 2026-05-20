@@ -16,8 +16,8 @@
   },
 
   "grub": {
-    "hwc": "drm_minigbm",
-    "gralloc": "minigbm_arcvm",
+    "hwc": "drm",
+    "gralloc": "gbm",
     "extra_params": [
       "vt.global_cursor_default=0",
       "quiet"
@@ -32,6 +32,7 @@
 
   "notes": [
     "FOSS build — no GApps; MicroG can be sideloaded post-boot",
+    "HWC=drm_minigbm causes mouse crash in Sakura — use HWC=drm with GRALLOC=gbm",
     "Source: SourceForge ISO — convert to qcow2 via fetch-distro.sh before use"
   ]
 }
