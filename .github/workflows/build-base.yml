@@ -454,7 +454,7 @@ jobs:
       - name: Assemble bootable disk image
         if: steps.plan.outputs.build == 'true'
         run: |
-SYSTEM_SZ=$(stat -c%s work/system.raw)
+          SYSTEM_SZ=$(stat -c%s work/system.raw)
           VENDOR_SZ=$([ -f work/vendor.raw  ] && stat -c%s work/vendor.raw  || echo 0)
           PRODUCT_SZ=$([ -f work/product.raw ] && stat -c%s work/product.raw || echo 0)
           BOOT_SZ=$(find work/ -maxdepth 1 -name 'boot-*' -exec du -sb {} + 2>/dev/null \
