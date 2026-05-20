@@ -98,6 +98,28 @@ UDATA="${ROOT}/userdata/userdata-${PROFILE_NAME}.qcow2"
   echo "[boot] Userdata volume not found — creating fresh $(jq -r '.userdata_size // "8G"' "$DEFAULTS_JSON" 2>/dev/null || echo "8G") volume..."
   UDATA_SIZE=$(jq -r '.userdata_size // "8G"' "$DEFAULTS_JSON" 2>/dev/null || echo "8G")
   qemu-img create -f qcow2 "$UDATA" "$UDATA_SIZE"
+
+  # Pre-format userdata so Android init sees a valid filesystem on first boot.
+  # Distro preference is read from the .distro sidecar written by set-profile.sh.
+  DISTRO_SIDECAR="${ROOT}/builds/android11-${PROFILE_NAME}.distro"
+  UDATA_FS="ext4"
+  if [ -f "$DISTRO_SIDECAR" ]; then
+    _DISTRO=$(cat "$DISTRO_SIDECAR")
+    _DISTRO_FILE="${ROOT}/androiddistro/${_DISTRO}.json"
+    if [ -f "$_DISTRO_FILE" ]; then
+      UDATA_FS=$(jq -r '.userdata_fs // "ext4"' "$_DISTRO_FILE" 2>/dev/null || echo "ext4")
+    fi
+  fi
+
+  echo "[boot] Pre-formatting userdata as ${UDATA_FS}..."
+  UDATA_NBD="/dev/nbd1"
+  sudo qemu-nbd -c "$UDATA_NBD" "$UDATA"
+  sleep 1
+  case "$UDATA_FS" in
+    f2fs) sudo mkfs.f2fs -f "$UDATA_NBD" ;;
+    *)    sudo mkfs.ext4 -F "$UDATA_NBD" ;;
+  esac
+  sudo qemu-nbd -d "$UDATA_NBD"
 }
 
 # ── KVM flags ─────────────────────────────────────────────────────────────────
@@ -272,9 +294,11 @@ qemu-system-x86_64 \
   "${GPU_FLAGS[@]}" \
   "${DISPLAY_FLAGS[@]}" \
   "${AUDIO_FLAGS[@]}" \
-  -device virtio-tablet \
-  -device virtio-keyboard \
-  -device qemu-xhci,id=xhci \
+  -device ich9-usb-ehci1 \
+  -device ich9-usb-uhci1 \
+  -device ich9-usb-uhci2 \
+  -device ich9-usb-uhci3 \
+  -device usb-tablet \
   -device virtio-net-pci,netdev=net0 \
   -netdev "user,id=net0,hostfwd=tcp::${ADB_PORT}-:5555" \
   -device virtio-rng-pci \

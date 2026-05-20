@@ -374,10 +374,11 @@ sudo cp "$REFIND_BIN" "${WORK}/mnt/efi/EFI/BOOT/BOOTx64.EFI"
 # Write rEFInd config — DATA= and HWC= left empty; set-profile.sh patches per-device
 DISTRO_DISPLAY_NAME=$(jq -r '.name' "$DISTRO_FILE")
 sudo tee "${WORK}/mnt/efi/EFI/BOOT/refind.conf" > /dev/null <<REFINDCFG
+scanfor manual
 timeout 3
 default_selection 1
 
-menuentry "${DISTRO_DISPLAY_NAME}" {
+menuentry "Boot ${DISTRO_DISPLAY_NAME} from EFI" {
     loader /kernel
     initrd /initrd.img
     options "root=/dev/ram0 androidboot.hardware=android_x86_64 androidboot.selinux=permissive SRC= DATA="

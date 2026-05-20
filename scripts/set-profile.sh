@@ -107,6 +107,7 @@ if [ -f "$OUT_IMG" ] && ! $REBUILD; then
   log "Use --rebuild to recreate it."
   # Still update the latest symlink in case it points elsewhere
   ln -sf "$(basename "$OUT_IMG")" "$LATEST_LINK"
+  echo "$DISTRO_NAME" > "${ROOT}/builds/android11-${PROFILE_NAME}.distro"
   log "Latest → $OUT_IMG"
 else
   # ── Create derived image from intermediate (zero-copy layer) ──────────────
@@ -272,6 +273,9 @@ else
       sudo sed -i '/^\s*options /s/ quiet\b//g' "$REFIND_CFG"
       sudo sed -i "/^\s*options /{ /DEBUG=/! s|\"$| DEBUG=${DEBUG_LEVEL}\"|; }" "$REFIND_CFG"
       log "Debug boot enabled (DEBUG=${DEBUG_LEVEL}) — type 'exit' at busybox prompt to continue"
+      log "NOTE: expect 'linker: Warning: failed to find generated linker configuration'"
+      log "      from /linkerconfig/ld.config.txt — this is normal at the busybox breakpoint."
+      log "      Android init hasn't run yet; linkerconfig generates that file after 'exit'."
     fi
     # --nomodeset: disable DRM/KMS, force software framebuffer
     if $NOMODESET; then
@@ -303,6 +307,9 @@ else
       sudo sed -i '/linux \/kernel/s/ quiet\b//g' "$GRUB_CFG"
       sudo sed -i "/linux \/kernel/{ /DEBUG=/! s|$| DEBUG=${DEBUG_LEVEL}|; }" "$GRUB_CFG"
       log "Debug boot enabled (DEBUG=${DEBUG_LEVEL}) — type 'exit' at busybox prompt to continue"
+      log "NOTE: expect 'linker: Warning: failed to find generated linker configuration'"
+      log "      from /linkerconfig/ld.config.txt — this is normal at the busybox breakpoint."
+      log "      Android init hasn't run yet; linkerconfig generates that file after 'exit'."
     fi
     # --nomodeset: disable DRM/KMS, force software framebuffer
     if $NOMODESET; then
@@ -332,6 +339,7 @@ else
 
   # Update latest symlink
   ln -sf "$(basename "$OUT_IMG")" "$LATEST_LINK"
+  echo "$DISTRO_NAME" > "${ROOT}/builds/android11-${PROFILE_NAME}.distro"
   log "Latest → $OUT_IMG"
 fi
 

@@ -6,6 +6,7 @@
   "base_image": "sakura-foss.qcow2",
 
   "inject_gapps": false,
+  "userdata_fs": "f2fs",
 
   "source": {
     "type": "direct",
