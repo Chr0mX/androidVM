@@ -106,16 +106,20 @@ CPU_VENDOR=$(detect_cpu_vendor)
 if $NO_KVM; then
   echo "[boot] KVM disabled — using TCG (slow)"
 elif [ -e /dev/kvm ]; then
+  # -enable-kvm activates the KVM hypervisor for near-native CPU performance.
+  # -cpu host exposes the host CPU features directly to the guest.
   KVM_FLAGS=(-enable-kvm -cpu host,+hypervisor)
+  echo "[boot] KVM enabled (${CPU_VENDOR})"
 else
-  echo "[boot] WARNING: /dev/kvm not available — falling back to TCG"
+  echo "[boot] WARNING: /dev/kvm not available — falling back to TCG (slow)"
+  echo "[boot]          Run: sudo modprobe kvm_${CPU_VENDOR} && sudo chmod 666 /dev/kvm"
 fi
 
 # ── GPU flags ─────────────────────────────────────────────────────────────────
 GPU_FLAGS=()
 case "$GPU" in
   virtio-vga-gl|virtio-vga)
-    GPU_FLAGS=(-device "${GPU},xres=1080,yres=1920")
+    GPU_FLAGS=(-device "${GPU},xres=1920,yres=1080")
     ;;
   VGA)
     GPU_FLAGS=(-vga std)
@@ -124,6 +128,9 @@ case "$GPU" in
     GPU_FLAGS=(-device "$GPU")
     ;;
 esac
+
+SECONDARY_GPU=$(jq -r '.secondary_gpu // empty' "$VM_PROFILE_FILE")
+[ -n "$SECONDARY_GPU" ] && GPU_FLAGS+=(-device "$SECONDARY_GPU")
 
 # ── Display flags ─────────────────────────────────────────────────────────────
 DISPLAY_FLAGS=()
@@ -139,8 +146,10 @@ if $SPICE_MODE; then
   GPU_FLAGS=()   # SPICE manages its own rendering
 elif $VNC_MODE; then
   VNC_PORT=$(( 5900 + VNC_DISPLAY ))
-  DISPLAY_FLAGS=(-display none -vnc ":${VNC_DISPLAY}")
-  GPU_FLAGS=(-device "virtio-vga,xres=1080,yres=1920")
+  # Use the profile's display backend (gtk,gl=on) for the GL context virtio-vga-gl needs;
+  # -vnc mirrors the same framebuffer for remote access.
+  GPU_FLAGS=(-device "virtio-vga-gl,xres=1920,yres=1080")
+  DISPLAY_FLAGS=(-display "$DISPLAY_CFG" -vnc ":${VNC_DISPLAY}")
   echo "[boot] VNC:         vnc://localhost:${VNC_PORT}  (display :${VNC_DISPLAY})"
 elif $HEADLESS; then
   DISPLAY_FLAGS=(-display none)
