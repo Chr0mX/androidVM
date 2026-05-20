@@ -57,7 +57,7 @@ env:
   GAPPS_SHA256: ""
   ARM_TRANS_COMMIT: "9324a8914b649b885dad6f2bfd14a67e5d1520bf"
   # Increment BUILD_VERSION whenever build logic changes to invalidate all caches.
-  BUILD_VERSION: "4"
+  BUILD_VERSION: "5"
 
 jobs:
   # ─── Job 1: compute distro matrix ────────────────────────────────────────
@@ -91,8 +91,9 @@ jobs:
             local base_image inject_gapps source_url source_filename cache_key source_type gapps_url
 
             base_image=$(  jq -r '.base_image'            "$cfg")
-            inject_gapps=$(jq -r 'if .inject_gapps == false then "false" else "true" end' "$cfg")
-            source_type=$( jq -r '.source.type'           "$cfg")
+            inject_gapps=$(    jq -r 'if .inject_gapps     == false then "false" else "true" end' "$cfg")
+            inject_arm_trans=$(jq -r 'if .inject_arm_trans == false then "false" else "true" end' "$cfg")
+            source_type=$(     jq -r '.source.type'           "$cfg")
             source_url=$(  jq -r '.source.url      // ""' "$cfg")
             source_filename=$(jq -r '.source.filename // ""' "$cfg")
 
@@ -123,7 +124,9 @@ jobs:
               --arg source_url      "$source_url" \
               --arg source_filename "$source_filename" \
               --arg gapps_url       "$gapps_url" \
+              --arg inject_arm_trans "$inject_arm_trans" \
               '{distro:$distro, base_image:$base_image, inject_gapps:$inject_gapps,
+                inject_arm_trans:$inject_arm_trans,
                 cache_key:$cache_key, source_url:$source_url, source_filename:$source_filename,
                 gapps_url:$gapps_url}')
             includes=$(echo "$includes" | jq ". + [$entry]")
@@ -263,7 +266,7 @@ jobs:
 
       # ── ARM translation ────────────────────────────────────────────────────
       - name: Cache ARM translation
-        if: steps.plan.outputs.build == 'true'
+        if: steps.plan.outputs.build == 'true' && matrix.inject_arm_trans == 'true'
         uses: actions/cache@v4
         id: armtrans-cache
         with:
@@ -271,7 +274,7 @@ jobs:
           key: arm-trans-${{ env.ARM_TRANS_COMMIT }}
 
       - name: Download ARM translation
-        if: steps.plan.outputs.build == 'true' && steps.armtrans-cache.outputs.cache-hit != 'true'
+        if: steps.plan.outputs.build == 'true' && matrix.inject_arm_trans == 'true' && steps.armtrans-cache.outputs.cache-hit != 'true'
         run: bash scripts/lib/fetch-arm-trans.sh arm-trans/
 
       # ── Extract partition images from ISO ──────────────────────────────────
@@ -334,12 +337,12 @@ jobs:
           done
 
       - name: Resize system image to accommodate injections
-        if: steps.plan.outputs.build == 'true'
+        if: steps.plan.outputs.build == 'true' && (matrix.inject_gapps == 'true' || matrix.inject_arm_trans == 'true')
         run: |
           e2fsck -yf work/system.raw || true
-          # ARM translation always injected (~100 MB); GApps adds ~600 MB on top
-          EXTRA_MB=200
-          [ "${{ matrix.inject_gapps }}" = "true" ] && EXTRA_MB=$(( EXTRA_MB + 600 ))
+          EXTRA_MB=0
+          [ "${{ matrix.inject_arm_trans }}" = "true" ] && EXTRA_MB=$(( EXTRA_MB + 200 ))
+          [ "${{ matrix.inject_gapps }}"    = "true" ] && EXTRA_MB=$(( EXTRA_MB + 600 ))
           echo "Expanding system.raw by ${EXTRA_MB} MB"
           truncate -s +${EXTRA_MB}M work/system.raw
           resize2fs work/system.raw
@@ -396,14 +399,14 @@ jobs:
           echo "GmsCore confirmed."
 
       - name: Inject ARM translation
-        if: steps.plan.outputs.build == 'true'
+        if: steps.plan.outputs.build == 'true' && matrix.inject_arm_trans == 'true'
         run: |
           sudo bash scripts/lib/inject-arm-trans.sh \
             arm-trans/libndk_translation \
             "${{ env.VENDOR_MNT }}"
 
       - name: Write ARM bridge props
-        if: steps.plan.outputs.build == 'true'
+        if: steps.plan.outputs.build == 'true' && matrix.inject_arm_trans == 'true'
         run: |
           VPROP="${{ env.VENDOR_MNT }}/build.prop"
           sudo touch "$VPROP"
@@ -428,7 +431,7 @@ jobs:
           sudo grep "ro\.dalvik\|ro\.enable\.native\|abilist" "$VPROP"
 
       - name: Restore SELinux file contexts
-        if: steps.plan.outputs.build == 'true'
+        if: steps.plan.outputs.build == 'true' && matrix.inject_arm_trans == 'true'
         run: |
           if command -v restorecon &>/dev/null; then
             sudo restorecon -R -F "${{ env.SYSTEM_MNT }}/priv-app/" 2>/dev/null || true
@@ -563,14 +566,14 @@ jobs:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: "${{ matrix.distro }} base image ${{ steps.tag.outputs.tag }}"
           body: |
-            Intermediate base image for **${{ matrix.distro }}** with ARM translation pre-baked.
+            Intermediate base image for **${{ matrix.distro }}**.
 
             | Field | Value |
             |---|---|
             | Distro | `${{ matrix.distro }}` |
             | Output | `${{ matrix.base_image }}` |
-            | ARM translation | commit `${{ env.ARM_TRANS_COMMIT }}` |
-            | GApps | ${{ matrix.inject_gapps == 'true' && matrix.gapps_url || 'none (FOSS build)' }} |
+            | ARM translation | ${{ matrix.inject_arm_trans == 'true' && format('commit `{0}`', env.ARM_TRANS_COMMIT) || 'none' }} |
+            | GApps | ${{ matrix.inject_gapps == 'true' && matrix.gapps_url || 'none' }} |
             | Source | `${{ matrix.source_filename }}` |
 
             **Verify before use:**
@@ -687,17 +690,21 @@ jobs:
             echo "=== GApps: FOSS build (${{ matrix.distro }}) — skipping GmsCore check ==="
           fi
 
-          echo "=== ARM translation presence ==="
-          check_file "${VENDOR_CHECK}/lib64/ndk_translation/libndk_translation.so"
-          check_file "${VENDOR_CHECK}/etc/binfmt_misc"
+          if [ "${{ matrix.inject_arm_trans }}" = "true" ]; then
+            echo "=== ARM translation presence ==="
+            check_file "${VENDOR_CHECK}/lib64/ndk_translation/libndk_translation.so"
+            check_file "${VENDOR_CHECK}/etc/binfmt_misc"
 
-          echo "=== ARM bridge props ==="
-          VPROP="${VENDOR_CHECK}/build.prop"
-          if sudo test -f "$VPROP" && sudo grep -q "ro.dalvik.vm.native.bridge=libndk_translation.so" "$VPROP"; then
-            echo "  ✓ ro.dalvik.vm.native.bridge present"
+            echo "=== ARM bridge props ==="
+            VPROP="${VENDOR_CHECK}/build.prop"
+            if sudo test -f "$VPROP" && sudo grep -q "ro.dalvik.vm.native.bridge=libndk_translation.so" "$VPROP"; then
+              echo "  ✓ ro.dalvik.vm.native.bridge present"
+            else
+              echo "  ✗ ro.dalvik.vm.native.bridge missing from ${VPROP}"
+              FAIL=$((FAIL+1))
+            fi
           else
-            echo "  ✗ ro.dalvik.vm.native.bridge missing from ${VPROP}"
-            FAIL=$((FAIL+1))
+            echo "=== ARM translation: disabled for ${{ matrix.distro }} — skipping checks ==="
           fi
 
           $HAS_VENDOR_IMG && sudo umount mnt/vendor 2>/dev/null || true

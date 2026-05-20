@@ -3,17 +3,14 @@
   "slug": "bliss14",
   "android_version": 11,
   "arch": "x86_64",
-  "base_image": "blissos14-gapps-arm.qcow2",
-  "inject_gapps": true,
+  "base_image": "blissos14-base.qcow2",
+  "inject_gapps": false,
+  "inject_arm_trans": false,
 
   "source": {
     "type": "sourceforge_latest",
     "sf_path": "Official/BlissOS14/FOSS/Generic",
     "sf_filter": ".iso"
-  },
-
-  "gapps": {
-    "url": "https://sourceforge.net/projects/opengapps/files/x86_64/20220503/open_gapps-x86_64-11.0-pico-20220503.zip/download"
   },
 
   "grub": {
@@ -31,8 +28,7 @@
   },
 
   "notes": [
-    "GApps (pico) + ARM translation pre-installed",
-    "drm_minigbm + minigbm: compatible with VNC (no host GL context required)",
-    "Upgrade to virtio-vga-gl + sdl/gtk,gl=on for interactive mode with virgl"
+    "Pure base image — no GApps, no ARM translation",
+    "drm_minigbm + minigbm: compatible with VNC (no host GL context required)"
   ]
 }

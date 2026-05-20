@@ -41,10 +41,11 @@ die()  { echo "[fetch-distro] ERROR: $*" >&2; exit 1; }
 warn() { echo "[fetch-distro] WARNING: $*" >&2; }
 
 # ── Load distro metadata ───────────────────────────────────────────────────────
-DISTRO_NAME=$(   jq -r '.name'               "$DISTRO_FILE")
-BASE_IMAGE=$(    jq -r '.base_image'         "$DISTRO_FILE")
-INJECT_GAPPS=$(  jq -r '.inject_gapps'      "$DISTRO_FILE")
-SOURCE_TYPE=$(   jq -r '.source.type'        "$DISTRO_FILE")
+DISTRO_NAME=$(    jq -r '.name'               "$DISTRO_FILE")
+BASE_IMAGE=$(     jq -r '.base_image'         "$DISTRO_FILE")
+INJECT_GAPPS=$(   jq -r 'if .inject_gapps     == false then "false" else "true" end' "$DISTRO_FILE")
+INJECT_ARM_TRANS=$(jq -r 'if .inject_arm_trans == false then "false" else "true" end' "$DISTRO_FILE")
+SOURCE_TYPE=$(    jq -r '.source.type'        "$DISTRO_FILE")
 
 OUT_IMG="${ROOT}/intermediate/${BASE_IMAGE}"
 
@@ -116,12 +117,16 @@ fi
 
 # ── ARM translation ────────────────────────────────────────────────────────────
 ARM_TRANS_DIR="${ROOT}/arm-trans/libndk_translation"
-if [ ! -f "${ARM_TRANS_DIR}/lib64/libndk_translation.so" ]; then
-  log "ARM translation libs not found — fetching..."
-  bash "${SCRIPT_DIR}/fetch-arm-trans.sh" "${ROOT}/arm-trans/"
+if [ "$INJECT_ARM_TRANS" = "true" ]; then
+  if [ ! -f "${ARM_TRANS_DIR}/lib64/libndk_translation.so" ]; then
+    log "ARM translation libs not found — fetching..."
+    bash "${SCRIPT_DIR}/fetch-arm-trans.sh" "${ROOT}/arm-trans/"
+  fi
+  [ -f "${ARM_TRANS_DIR}/lib64/libndk_translation.so" ] \
+    || die "libndk_translation.so still missing after fetch"
+else
+  log "ARM translation injection disabled (inject_arm_trans=false)"
 fi
-[ -f "${ARM_TRANS_DIR}/lib64/libndk_translation.so" ] \
-  || die "libndk_translation.so still missing after fetch"
 
 # ── Workspace ─────────────────────────────────────────────────────────────────
 WORK="${ROOT}/cache/fetch-distro-${SLUG}"
@@ -279,32 +284,34 @@ if [ "$INJECT_GAPPS" = "true" ]; then
 fi
 
 # ── Inject ARM translation ─────────────────────────────────────────────────────
-log "Injecting ARM translation libs..."
-sudo bash "${SCRIPT_DIR}/inject-arm-trans.sh" \
-  "$ARM_TRANS_DIR" "$VENDOR"
+if [ "$INJECT_ARM_TRANS" = "true" ]; then
+  log "Injecting ARM translation libs..."
+  sudo bash "${SCRIPT_DIR}/inject-arm-trans.sh" \
+    "$ARM_TRANS_DIR" "$VENDOR"
 
-# ── Write ARM bridge props ─────────────────────────────────────────────────────
-log "Writing ARM bridge props to vendor/build.prop..."
-VPROP="${VENDOR}/build.prop"
-sudo touch "$VPROP"
-for kv in \
-  "ro.product.cpu.abilist=x86_64,x86,arm64-v8a,armeabi-v7a,armeabi" \
-  "ro.product.cpu.abilist32=x86,armeabi-v7a,armeabi" \
-  "ro.product.cpu.abilist64=x86_64,arm64-v8a" \
-  "ro.dalvik.vm.native.bridge=libndk_translation.so" \
-  "ro.enable.native.bridge.exec=1" \
-  "ro.vendor.enable.native.bridge.exec=1" \
-  "ro.vendor.enable.native.bridge.exec64=1" \
-  "ro.ndk_translation.version=0.2.2"
-do
-  key="${kv%%=*}"
-  if sudo grep -q "^${key}=" "$VPROP" 2>/dev/null; then
-    sudo sed -i "s|^${key}=.*|${kv}|" "$VPROP"
-  else
-    echo "$kv" | sudo tee -a "$VPROP" > /dev/null
-  fi
-done
-sudo grep "ro\.dalvik\|ro\.enable\.native\|abilist" "$VPROP" || true
+  # ── Write ARM bridge props ───────────────────────────────────────────────────
+  log "Writing ARM bridge props to vendor/build.prop..."
+  VPROP="${VENDOR}/build.prop"
+  sudo touch "$VPROP"
+  for kv in \
+    "ro.product.cpu.abilist=x86_64,x86,arm64-v8a,armeabi-v7a,armeabi" \
+    "ro.product.cpu.abilist32=x86,armeabi-v7a,armeabi" \
+    "ro.product.cpu.abilist64=x86_64,arm64-v8a" \
+    "ro.dalvik.vm.native.bridge=libndk_translation.so" \
+    "ro.enable.native.bridge.exec=1" \
+    "ro.vendor.enable.native.bridge.exec=1" \
+    "ro.vendor.enable.native.bridge.exec64=1" \
+    "ro.ndk_translation.version=0.2.2"
+  do
+    key="${kv%%=*}"
+    if sudo grep -q "^${key}=" "$VPROP" 2>/dev/null; then
+      sudo sed -i "s|^${key}=.*|${kv}|" "$VPROP"
+    else
+      echo "$kv" | sudo tee -a "$VPROP" > /dev/null
+    fi
+  done
+  sudo grep "ro\.dalvik\|ro\.enable\.native\|abilist" "$VPROP" || true
+fi
 
 # ── Unmount partition images ──────────────────────────────────────────────────
 log "Unmounting partition images..."
