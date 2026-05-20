@@ -88,22 +88,28 @@ log "Filename: ${ISO_FILENAME}"
 
 # ── GApps resolution ──────────────────────────────────────────────────────────
 GAPPS_ZIP=""
-GAPPS_URL_DEFAULT="https://sourceforge.net/projects/opengapps/files/x86_64/20220503/open_gapps-x86_64-11.0-pico-20220503.zip/download"
+# Per-distro URL from JSON; fall back to OpenGApps pico x86_64 11.0 if unset
+GAPPS_URL_DEFAULT=$(jq -r '.gapps.url // ""' "$DISTRO_FILE")
+[ -z "$GAPPS_URL_DEFAULT" ] && \
+  GAPPS_URL_DEFAULT="https://sourceforge.net/projects/opengapps/files/x86_64/20220503/open_gapps-x86_64-11.0-pico-20220503.zip/download"
+
+# Per-slug cache path avoids bliss14 and bliss15 sharing the same gapps.zip
+GAPPS_CACHED="${ROOT}/gapps/${SLUG}-gapps.zip"
 
 if [ "$INJECT_GAPPS" = "true" ]; then
   if [ -n "$GAPPS_ZIP_ARG" ]; then
     [ -f "$GAPPS_ZIP_ARG" ] || die "Specified GApps zip not found: ${GAPPS_ZIP_ARG}"
     GAPPS_ZIP="$GAPPS_ZIP_ARG"
+  elif [ -f "$GAPPS_CACHED" ]; then
+    GAPPS_ZIP="$GAPPS_CACHED"
   elif [ -f "${ROOT}/gapps/gapps.zip" ]; then
     GAPPS_ZIP="${ROOT}/gapps/gapps.zip"
-  elif [ -f "${ROOT}/gapps/mindthegapps.zip" ]; then
-    GAPPS_ZIP="${ROOT}/gapps/mindthegapps.zip"
   else
-    log "GApps zip not found — downloading OpenGApps pico x86_64 11.0..."
+    log "GApps zip not found — downloading from ${GAPPS_URL_DEFAULT} ..."
     mkdir -p "${ROOT}/gapps"
     curl -L --retry 5 --retry-delay 10 --retry-max-time 300 --progress-bar \
-      "$GAPPS_URL_DEFAULT" -o "${ROOT}/gapps/gapps.zip"
-    GAPPS_ZIP="${ROOT}/gapps/gapps.zip"
+      "$GAPPS_URL_DEFAULT" -o "${GAPPS_CACHED}"
+    GAPPS_ZIP="$GAPPS_CACHED"
   fi
   log "GApps: ${GAPPS_ZIP}"
 fi

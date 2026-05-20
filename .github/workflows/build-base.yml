@@ -37,7 +37,7 @@ on:
         type: string
         default: ''
       gapps_url:
-        description: 'Override GApps URL for BlissOS (leave blank for default)'
+        description: 'Override GApps URL for all distros (leave blank to use per-distro default from androiddistro/*.json)'
         type: string
         default: ''
       run_smoke_test:
@@ -54,12 +54,10 @@ permissions:
   contents: write   # required to create GitHub releases and upload assets
 
 env:
-  # OpenGApps pico x86_64 for Android 11 — last build before the project froze
-  GAPPS_URL_DEFAULT: "https://sourceforge.net/projects/opengapps/files/x86_64/20220503/open_gapps-x86_64-11.0-pico-20220503.zip/download"
   GAPPS_SHA256: ""
   ARM_TRANS_COMMIT: "9324a8914b649b885dad6f2bfd14a67e5d1520bf"
   # Increment BUILD_VERSION whenever build logic changes to invalidate all caches.
-  BUILD_VERSION: "3"
+  BUILD_VERSION: "4"
 
 jobs:
   # ─── Job 1: compute distro matrix ────────────────────────────────────────
@@ -67,19 +65,9 @@ jobs:
     name: Preflight
     runs-on: ubuntu-22.04
     outputs:
-      matrix:    ${{ steps.matrix.outputs.matrix }}
-      gapps_url: ${{ steps.gapps.outputs.gapps_url }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Resolve GApps URL
-        id: gapps
-        run: |
-          if [ -n "${{ inputs.gapps_url }}" ]; then
-            echo "gapps_url=${{ inputs.gapps_url }}" >> $GITHUB_OUTPUT
-          else
-            echo "gapps_url=${{ env.GAPPS_URL_DEFAULT }}" >> $GITHUB_OUTPUT
-          fi
 
       - name: Build distro matrix
         id: matrix
@@ -100,7 +88,7 @@ jobs:
           add_distro() {
             local slug="$1"
             local cfg="androiddistro/${slug}.json"
-            local base_image inject_gapps source_url source_filename cache_key source_type
+            local base_image inject_gapps source_url source_filename cache_key source_type gapps_url
 
             base_image=$(  jq -r '.base_image'            "$cfg")
             inject_gapps=$(jq -r '.inject_gapps // true'  "$cfg")
@@ -108,13 +96,17 @@ jobs:
             source_url=$(  jq -r '.source.url      // ""' "$cfg")
             source_filename=$(jq -r '.source.filename // ""' "$cfg")
 
+            # GApps URL: per-distro default from JSON, overridable via workflow_dispatch input
+            gapps_url=$(jq -r '.gapps.url // ""' "$cfg")
+            [ -n "${{ inputs.gapps_url }}" ] && gapps_url="${{ inputs.gapps_url }}"
+
             # BlissOS: resolve latest ISO filename from SourceForge for stable cache key
             if [ "$source_type" = "sourceforge_latest" ]; then
               sf_path=$(jq -r '.source.sf_path'   "$cfg")
               sf_filter=$(jq -r '.source.sf_filter' "$cfg")
               resolver_out=$(python3 scripts/lib/resolve-blissos-url.py \
                 --path "$sf_path" --filter "$sf_filter" \
-                2>/dev/null || echo "url=\nfilename=bliss14-unknown.iso")
+                2>/dev/null || echo "url=\nfilename=${slug}-unknown.iso")
               source_url=$(     echo "$resolver_out" | grep '^url='      | cut -d= -f2-)
               source_filename=$(echo "$resolver_out" | grep '^filename=' | cut -d= -f2-)
             fi
@@ -130,8 +122,10 @@ jobs:
               --arg cache_key       "$cache_key" \
               --arg source_url      "$source_url" \
               --arg source_filename "$source_filename" \
+              --arg gapps_url       "$gapps_url" \
               '{distro:$distro, base_image:$base_image, inject_gapps:$inject_gapps,
-                cache_key:$cache_key, source_url:$source_url, source_filename:$source_filename}')
+                cache_key:$cache_key, source_url:$source_url, source_filename:$source_filename,
+                gapps_url:$gapps_url}')
             includes=$(echo "$includes" | jq ". + [$entry]")
           }
 
@@ -251,14 +245,14 @@ jobs:
         id: gapps-cache
         with:
           path: gapps/
-          key: gapps-${{ needs.preflight.outputs.gapps_url }}
+          key: gapps-${{ matrix.gapps_url }}
 
       - name: Download GApps
         if: steps.plan.outputs.build == 'true' && matrix.inject_gapps == 'true' && steps.gapps-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p gapps
           curl -L --retry 5 --retry-delay 10 \
-            "${{ needs.preflight.outputs.gapps_url }}" \
+            "${{ matrix.gapps_url }}" \
             -o gapps/gapps.zip
           if [ -n "${{ env.GAPPS_SHA256 }}" ]; then
             echo "${{ env.GAPPS_SHA256 }}  gapps/gapps.zip" | sha256sum -c
@@ -572,7 +566,7 @@ jobs:
             | Distro | `${{ matrix.distro }}` |
             | Output | `${{ matrix.base_image }}` |
             | ARM translation | commit `${{ env.ARM_TRANS_COMMIT }}` |
-            | GApps | ${{ matrix.inject_gapps == 'true' && 'OpenGApps pico x86_64 11.0' || 'none (FOSS build)' }} |
+            | GApps | ${{ matrix.inject_gapps == 'true' && matrix.gapps_url || 'none (FOSS build)' }} |
             | Source | `${{ matrix.source_filename }}` |
 
             **Verify before use:**

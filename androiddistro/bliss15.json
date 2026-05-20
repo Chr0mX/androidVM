@@ -3,13 +3,17 @@
   "slug": "bliss15",
   "android_version": 12,
   "arch": "x86_64",
-  "base_image": "blissos15-foss-arm.qcow2",
-  "inject_gapps": false,
+  "base_image": "blissos15-gapps-arm.qcow2",
+  "inject_gapps": true,
 
   "source": {
     "type": "sourceforge_latest",
     "sf_path": "Official/BlissOS15/FOSS/Generic",
     "sf_filter": ".iso"
+  },
+
+  "gapps": {
+    "url": "https://github.com/MindTheGapps/12.1.0-x86_64/releases/download/MindTheGapps-12.1.0-x86_64-20231025_201056/MindTheGapps-12.1.0-x86_64-20231025_201056.zip"
   },
 
   "grub": {
@@ -27,7 +31,7 @@
   },
 
   "notes": [
-    "FOSS edition — no GApps, ARM translation pre-installed",
+    "MindTheGapps 12.1.0 x86_64 + ARM translation pre-installed",
     "Android 12 base",
     "Same drm_minigbm + minigbm display stack as BlissOS 14"
   ]
