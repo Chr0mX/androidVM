@@ -1,11 +1,11 @@
 {
-  "description": "Compatibility profile. For older hardware. Requires OpenGL host support.",
+  "description": "Compatibility profile. For older hardware.",
   "ram_mb": 2048,
   "cpu_cores": 2,
   "cpu_threads": 1,
   "hugepages": false,
-  "gpu": "virtio-vga-gl",
-  "display": "gtk,gl=on",
+  "gpu": "virtio-vga",
+  "display": "gtk,gl=off",
   "audio": "none",
   "multithreaded_render": false
 }

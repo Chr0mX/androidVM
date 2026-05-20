@@ -15,23 +15,22 @@
   },
 
   "grub": {
-    "hwc": "drm",
-    "gralloc": "gbm",
+    "hwc": "drm_minigbm",
+    "gralloc": "minigbm_arcvm",
     "extra_params": [
-      "vt.global_cursor_default=0"
+      "vt.global_cursor_default=0",
+      "quiet"
     ]
   },
 
   "qemu": {
-    "preferred_gpu": "virtio-vga-gl",
-    "preferred_display": "sdl,gl=on",
+    "preferred_gpu": "virtio-vga",
+    "preferred_display": "gtk,gl=off",
     "audio_device": "AC97"
   },
 
   "notes": [
     "FOSS build — no GApps; MicroG can be sideloaded post-boot",
-    "HWC=drm_minigbm causes mouse crash in Sakura — use HWC=drm with GRALLOC=gbm",
-    "Requires virgl: pair virtio-vga-gl with sdl,gl=on or gtk,gl=on",
-    "Source: SourceForge ISO — convert to qcow2 via build-intermediate.sh before use"
+    "Source: SourceForge ISO — convert to qcow2 via fetch-distro.sh before use"
   ]
 }
