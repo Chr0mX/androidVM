@@ -2,30 +2,35 @@
 # Create a per-profile bootable image by layering identity props onto the intermediate.
 #
 # Usage: set-profile.sh <profile-name> [--distro <name>] [--rebuild] [--boot] [--check]
+#                                       [--boot-param <param>] ...
 #
-#   --distro <name>  Android distro to use (default: bliss14); matches androiddistro/<name>.json
-#   --rebuild        Force recreation even if a same-day build already exists
-#   --boot           Launch the VM after building
-#   --check          Run verify.sh against the booted VM
+#   --distro <name>       Android distro to use (default: bliss14); matches androiddistro/<name>.json
+#   --rebuild             Force recreation even if a same-day build already exists
+#   --boot                Launch the VM after building
+#   --check               Run verify.sh against the booted VM
+#   --boot-param <param>  Append an extra kernel parameter to the boot command line.
+#                         May be repeated: --boot-param quiet --boot-param nomodeset
 set -euo pipefail
 IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-PROFILE_NAME="${1:?Usage: set-profile.sh <profile-name> [--distro <name>] [--rebuild] [--boot] [--check]}"
+PROFILE_NAME="${1:?Usage: set-profile.sh <profile-name> [--distro <name>] [--rebuild] [--boot] [--check] [--boot-param <param>]}"
 DISTRO_NAME="bliss14"
 REBUILD=false
 BOOT=false
 CHECK=false
+EXTRA_BOOT_PARAMS=()
 
 shift
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --distro)  DISTRO_NAME="${2:?--distro requires a name}"; shift 2 ;;
-    --rebuild) REBUILD=true;  shift ;;
-    --boot)    BOOT=true;     shift ;;
-    --check)   CHECK=true;    shift ;;
+    --distro)     DISTRO_NAME="${2:?--distro requires a name}"; shift 2 ;;
+    --rebuild)    REBUILD=true;  shift ;;
+    --boot)       BOOT=true;     shift ;;
+    --check)      CHECK=true;    shift ;;
+    --boot-param) EXTRA_BOOT_PARAMS+=("${2:?--boot-param requires a value}"); shift 2 ;;
     *) echo "[set-profile] Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -244,6 +249,11 @@ else
       key="${param%%=*}"
       sudo sed -i "/^\s*options /{ /${key}/! s|\"$| ${param}\"|; }" "$REFIND_CFG"
     done
+    # Caller-supplied extra params (--boot-param)
+    for param in "${EXTRA_BOOT_PARAMS[@]}"; do
+      key="${param%%=*}"
+      sudo sed -i "/^\s*options /{ /${key}/! s|\"$| ${param}\"|; }" "$REFIND_CFG"
+    done
     # Serial console for serial log visibility
     sudo sed -i "/^\s*options /{ /console=ttyS0/! s|\"$| console=ttyS0,115200n8\"|; }" "$REFIND_CFG"
     log "rEFInd options after patching:"
@@ -256,6 +266,11 @@ else
     sudo sed -i 's/ DATA=$/ DATA=\/dev\/vdb/'   "$GRUB_CFG"
     sudo sed -i "/linux \/kernel/{ /HWC=/! s|$| HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC}|; }" "$GRUB_CFG"
     for param in "${DISTRO_EXTRA_PARAMS[@]}"; do
+      key="${param%%=*}"
+      sudo sed -i "/linux \/kernel/{ /${key}/! s|$| ${param}|; }" "$GRUB_CFG"
+    done
+    # Caller-supplied extra params (--boot-param)
+    for param in "${EXTRA_BOOT_PARAMS[@]}"; do
       key="${param%%=*}"
       sudo sed -i "/linux \/kernel/{ /${key}/! s|$| ${param}|; }" "$GRUB_CFG"
     done
