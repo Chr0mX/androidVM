@@ -105,16 +105,10 @@ jobs:
             if [ "$source_type" = "sourceforge_latest" ]; then
               sf_path=$(jq -r '.source.sf_path'   "$cfg")
               sf_filter=$(jq -r '.source.sf_filter' "$cfg")
-              if resolver_out=$(python3 scripts/lib/resolve-blissos-url.py \
-                  --path "$sf_path" --filter "$sf_filter" 2>&1); then
-                source_url=$(     echo "$resolver_out" | grep '^url='      | cut -d= -f2-)
-                source_filename=$(echo "$resolver_out" | grep '^filename=' | cut -d= -f2-)
-              else
-                echo "::warning::SourceForge resolver failed for ${slug} — skipping distro"
-                echo "  Resolver output: ${resolver_out}"
-                echo "  To build manually: workflow_dispatch with source_img_url set"
-                return 0
-              fi
+              resolver_out=$(python3 scripts/lib/resolve-blissos-url.py \
+                --path "$sf_path" --filter "$sf_filter" 2>/dev/null)
+              source_url=$(     echo "$resolver_out" | grep '^url='      | cut -d= -f2-)
+              source_filename=$(echo "$resolver_out" | grep '^filename=' | cut -d= -f2-)
             fi
 
             cache_key="base-image-${slug}-$(printf '%s' \

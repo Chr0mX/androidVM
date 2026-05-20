@@ -33,6 +33,20 @@ _HREF_RE = re.compile(
     r'(/([^"/]+\.iso))/download)"'
 )
 
+# Transforms the SF /download redirect URL to the direct CDN URL.
+# The /download redirect serves an HTML mirror-selection page to many
+# cloud/CI IPs; downloads.sourceforge.net goes straight to the CDN.
+_SF_REDIRECT = re.compile(
+    r'https://sourceforge\.net/projects/([^/]+)/files/(.*)/download$'
+)
+
+
+def to_direct_url(url: str) -> str:
+    m = _SF_REDIRECT.match(url)
+    if m:
+        return f"https://downloads.sourceforge.net/project/{m.group(1)}/{m.group(2)}"
+    return url
+
 # Date embedded in Bliss OS filenames: ...-YYYYMMDD.iso
 _DATE_RE = re.compile(r"-(\d{8})\.iso$", re.IGNORECASE)
 
@@ -82,6 +96,7 @@ def main() -> None:
     # Newest date first
     candidates.sort(key=lambda t: t[0], reverse=True)
     _date, name, download_url = candidates[0]
+    download_url = to_direct_url(download_url)
 
     print(f"url={download_url}")
     print(f"filename={name}")
