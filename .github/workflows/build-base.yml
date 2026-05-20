@@ -542,6 +542,11 @@ jobs:
       - name: Split large image for release upload
         id: split
         run: |
+          if [ ! -f "image-cache/${{ matrix.base_image }}" ]; then
+            echo "::error::image-cache/${{ matrix.base_image }} not found — build or cache restore failed"
+            ls -lh image-cache/ 2>/dev/null || echo "(image-cache/ missing)"
+            exit 1
+          fi
           SIZE=$(stat -c%s "image-cache/${{ matrix.base_image }}")
           echo "Image size: $(( SIZE / 1024 / 1024 )) MB"
           if [ "$SIZE" -gt 1990000000 ]; then
@@ -613,9 +618,12 @@ jobs:
         with:
           path: image-cache/
           key: ${{ matrix.cache_key }}
+          fail-on-cache-miss: true
 
       - name: Verify image integrity
         run: |
+          echo "=== image-cache contents ==="
+          ls -lh image-cache/ 2>/dev/null || echo "(image-cache/ is empty or missing)"
           echo "=== qemu-img check ==="
           qemu-img check "image-cache/${{ matrix.base_image }}"
           echo "=== Image info ==="
