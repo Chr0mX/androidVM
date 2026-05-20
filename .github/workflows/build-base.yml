@@ -729,25 +729,25 @@ jobs:
             echo "=== ARM translation: disabled for ${{ matrix.distro }} — skipping checks ==="
           fi
 
-          echo "=== rEFInd bootloader ==="
+          echo "=== GRUB bootloader ==="
           sudo mkdir -p mnt/efi
           sudo mount /dev/nbd0p1 mnt/efi
           if sudo test -f mnt/efi/EFI/BOOT/BOOTx64.EFI; then
-            echo "  ✓ mnt/efi/EFI/BOOT/BOOTx64.EFI (rEFInd binary)"
+            echo "  ✓ mnt/efi/EFI/BOOT/BOOTx64.EFI (GRUB binary)"
           else
             echo "  ✗ MISSING: mnt/efi/EFI/BOOT/BOOTx64.EFI"
             FAIL=$((FAIL+1))
           fi
-          if sudo test -f mnt/efi/EFI/BOOT/refind.conf; then
-            echo "  ✓ mnt/efi/EFI/BOOT/refind.conf"
+          if sudo test -f mnt/efi/EFI/BOOT/grub.cfg; then
+            echo "  ✓ mnt/efi/EFI/BOOT/grub.cfg"
           else
-            echo "  ✗ MISSING: mnt/efi/EFI/BOOT/refind.conf"
+            echo "  ✗ MISSING: mnt/efi/EFI/BOOT/grub.cfg"
             FAIL=$((FAIL+1))
           fi
           if sudo test -f mnt/efi/kernel; then
             echo "  ✓ mnt/efi/kernel"
           else
-            echo "  ⚠ mnt/efi/kernel absent — GRUB-style kernel on data partition?"
+            echo "  ⚠ mnt/efi/kernel absent — expected on EFI partition"
           fi
           sudo umount mnt/efi 2>/dev/null || true
           sudo rmdir mnt/efi 2>/dev/null || true
@@ -782,10 +782,10 @@ jobs:
           [ -e /dev/kvm ] || { echo "::error::/dev/kvm not found on this runner"; exit 1; }
           echo "KVM confirmed: $(ls -la /dev/kvm)"
 
-      - name: Install ADB
+      - name: Install ADB and OVMF
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends android-tools-adb qemu-utils
+          sudo apt-get install -y --no-install-recommends android-tools-adb qemu-utils ovmf
 
       - name: Get bliss14 cache key from matrix
         id: bliss14
@@ -809,18 +809,41 @@ jobs:
 
       - name: Boot VM headlessly
         run: |
+          # Locate OVMF firmware (path varies by Ubuntu version)
+          OVMF_CODE=""
+          for f in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd \
+                   /usr/share/ovmf/OVMF.fd /usr/share/qemu/OVMF.fd; do
+            [ -f "$f" ] && OVMF_CODE="$f" && break
+          done
+          [ -n "$OVMF_CODE" ] || { echo "::error::OVMF firmware not found"; exit 1; }
+          OVMF_VARS=""
+          for f in /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd \
+                   /usr/share/ovmf/OVMF_VARS.fd; do
+            [ -f "$f" ] && OVMF_VARS="$f" && break
+          done
+          # Always use a zeroed VARS file so OVMF starts clean (no stale BdsDxe entries)
+          VARS_COPY=/tmp/ovmf-vars.fd
+          if [ -n "$OVMF_VARS" ]; then
+            dd if=/dev/zero of="$VARS_COPY" bs=$(stat -c%s "$OVMF_VARS") count=1 2>/dev/null
+          else
+            dd if=/dev/zero of="$VARS_COPY" bs=540672 count=1 2>/dev/null
+          fi
           qemu-system-x86_64 \
             -enable-kvm \
             -smp 2 -m 2048 \
             -cpu host \
-            -machine q35,vmport=off \
+            -machine pc-q35-10.0,vmport=off \
+            -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
+            -drive "if=pflash,format=raw,file=${VARS_COPY}" \
             -drive "file=image-cache/${{ steps.bliss14.outputs.base_image }},if=virtio,index=0" \
             -drive "file=userdata-test.qcow2,if=virtio,index=1" \
             -device virtio-net-pci,netdev=net0 \
             -netdev user,id=net0,hostfwd=tcp::5555-:5555 \
-            -device virtio-tablet \
-            -device virtio-keyboard \
-            -device qemu-xhci,id=xhci \
+            -device ich9-usb-ehci1 \
+            -device ich9-usb-uhci1 \
+            -device ich9-usb-uhci2 \
+            -device ich9-usb-uhci3 \
+            -device usb-tablet \
             -display none -vga std \
             -daemonize \
             -pidfile /tmp/qemu.pid
