@@ -488,16 +488,16 @@ jobs:
           [ -f work/boot-ramdisk.img ] && sudo cp work/boot-ramdisk.img mnt/efi/initrd.img || true
           [ -f work/boot-initrd.img  ] && sudo cp work/boot-initrd.img  mnt/efi/initrd.img || true
 
-          # Install GRUB EFI from the ISO's own EFI directory.
-          # ISOs ship BOOTx64.EFI (shim) + grubx64.efi (actual GRUB) as siblings.
-          # Copying only one file breaks the chain — copy the entire BOOT directory.
-          GRUB_BIN=$(find work/boot-efi/ -iname 'bootx64.efi' 2>/dev/null | head -1)
-          [ -f "$GRUB_BIN" ] || GRUB_BIN=$(find work/boot-efi/ -iname 'grubx64.efi' 2>/dev/null | head -1)
-          [ -f "$GRUB_BIN" ] || { echo "::error::GRUB EFI binary not found in ISO"; exit 1; }
-          EFI_BOOT_DIR="$(dirname "$GRUB_BIN")"
-          echo "EFI/BOOT source: ${EFI_BOOT_DIR}/ — $(ls "${EFI_BOOT_DIR}/")"
+          # Install GRUB EFI extracted from the ISO.
+          # ISOs ship BOOTx64.EFI (shim) + grubx64.efi (the real GRUB binary).
+          # We don't need Secure Boot, so install grubx64.efi directly as BOOTx64.EFI —
+          # OVMF runs it straight and there is no shim chain-load to fail.
+          GRUB_EFI=$(find work/boot-efi/ -iname 'grubx64.efi' 2>/dev/null | head -1)
+          [ -f "$GRUB_EFI" ] || GRUB_EFI=$(find work/boot-efi/ -iname 'bootx64.efi' 2>/dev/null | head -1)
+          [ -f "$GRUB_EFI" ] || { echo "::error::GRUB EFI binary not found in ISO"; exit 1; }
+          echo "GRUB EFI: $(basename "$GRUB_EFI") → EFI/BOOT/BOOTx64.EFI"
           sudo mkdir -p mnt/efi/EFI/BOOT
-          sudo cp -r "${EFI_BOOT_DIR}/." mnt/efi/EFI/BOOT/
+          sudo cp "$GRUB_EFI" mnt/efi/EFI/BOOT/BOOTx64.EFI
 
           # Write GRUB config — DATA= and HWC= left empty; set-profile.sh patches per-device
           DISTRO_NAME=$(jq -r '.name' androiddistro/${{ matrix.distro }}.json)
