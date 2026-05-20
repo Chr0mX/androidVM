@@ -353,37 +353,29 @@ sudo cp "${WORK}/system.raw" "${WORK}/mnt/android/system.img"
 [ -f "${WORK}/vendor.raw"  ] && sudo cp "${WORK}/vendor.raw"  "${WORK}/mnt/android/vendor.img"  || true
 [ -f "${WORK}/product.raw" ] && sudo cp "${WORK}/product.raw" "${WORK}/mnt/android/product.img" || true
 
-# Kernel + initrd go on the EFI partition so rEFInd can load them (FAT32, no driver needed)
+# Kernel + initrd go on the EFI partition so GRUB can load them (FAT32, no driver needed)
 [ -f "${WORK}/boot-kernel"      ] && sudo cp "${WORK}/boot-kernel"      "${WORK}/mnt/efi/kernel"     || true
 [ -f "${WORK}/boot-ramdisk.img" ] && sudo cp "${WORK}/boot-ramdisk.img" "${WORK}/mnt/efi/initrd.img" || true
 [ -f "${WORK}/boot-initrd.img"  ] && sudo cp "${WORK}/boot-initrd.img"  "${WORK}/mnt/efi/initrd.img" || true
 
-# Install rEFInd as the EFI fallback bootloader
-REFIND_BIN=$(find /usr/share/refind/ -name 'refind_x64.efi' 2>/dev/null | head -1 || true)
-if [ -z "$REFIND_BIN" ]; then
-  # Extract from package without running post-install boot-setup script
-  apt-get download refind -o Dir::Cache="${WORK}/apt-cache" 2>/dev/null || true
-  dpkg -x "${WORK}"/apt-cache/archives/refind_*.deb "${WORK}/refind-pkg/" 2>/dev/null || true
-  REFIND_BIN=$(find "${WORK}/refind-pkg/" -name 'refind_x64.efi' 2>/dev/null | head -1 || true)
-fi
-[ -f "$REFIND_BIN" ] || die "rEFInd x64 binary not found — install: sudo apt install refind"
+# Install GRUB EFI from the ISO's own EFI directory (already extracted to boot-efi/)
+GRUB_BIN=$(find "${WORK}/boot-efi/" \( -iname 'bootx64.efi' -o -iname 'grubx64.efi' \) 2>/dev/null | head -1 || true)
+[ -f "$GRUB_BIN" ] || die "GRUB EFI binary not found in ISO (expected boot-efi/BOOT/BOOTx64.EFI) — is this a GRUB-based ISO?"
 
 sudo mkdir -p "${WORK}/mnt/efi/EFI/BOOT"
-sudo cp "$REFIND_BIN" "${WORK}/mnt/efi/EFI/BOOT/BOOTx64.EFI"
+sudo cp "$GRUB_BIN" "${WORK}/mnt/efi/EFI/BOOT/BOOTx64.EFI"
 
-# Write rEFInd config — DATA= and HWC= left empty; set-profile.sh patches per-device
+# Write GRUB config — DATA= and HWC= left empty; set-profile.sh patches per-device
 DISTRO_DISPLAY_NAME=$(jq -r '.name' "$DISTRO_FILE")
-sudo tee "${WORK}/mnt/efi/EFI/BOOT/refind.conf" > /dev/null <<REFINDCFG
-scanfor manual
-timeout 3
-default_selection 1
+sudo tee "${WORK}/mnt/efi/EFI/BOOT/grub.cfg" > /dev/null <<GRUBCFG
+set default=0
+set timeout=3
 
-menuentry "Boot ${DISTRO_DISPLAY_NAME} from EFI" {
-    loader /kernel
+menuentry "${DISTRO_DISPLAY_NAME}" {
+    linux /kernel root=/dev/ram0 androidboot.hardware=android_x86_64 androidboot.selinux=permissive SRC= DATA=
     initrd /initrd.img
-    options "root=/dev/ram0 androidboot.hardware=android_x86_64 androidboot.selinux=permissive SRC= DATA="
 }
-REFINDCFG
+GRUBCFG
 
 sudo umount "${WORK}/mnt/efi"    "${WORK}/mnt/android"
 sudo rmdir  "${WORK}/mnt/efi"    "${WORK}/mnt/android"

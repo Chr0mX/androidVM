@@ -146,7 +146,7 @@ else
   log "Partition layout:"
   lsblk /dev/nbd0
 
-  # p1 = EFI FAT32 partition (rEFInd binary + refind.conf + kernel + initrd)
+  # p1 = EFI FAT32 partition (GRUB binary + grub.cfg + kernel + initrd)
   sudo mount /dev/nbd0p1 "$MNT_EFI"
   EFI_MOUNTED=true
 
@@ -247,49 +247,18 @@ else
   fi
 
   # ── Patch bootloader config ───────────────────────────────────────────────
+  GRUB_CFG=""
+  GRUB_CFG_EFI="${MNT_EFI}/EFI/BOOT/grub.cfg"
+  GRUB_CFG_ANDROID="${MNT_ANDROID}/boot/grub/grub.cfg"
   REFIND_CFG="${MNT_EFI}/EFI/BOOT/refind.conf"
-  GRUB_CFG="${MNT_ANDROID}/boot/grub/grub.cfg"
 
-  if [ -f "$REFIND_CFG" ]; then
-    # ── rEFInd image (new CI builds) ──────────────────────────────────────
-    log "Patching rEFInd config: DATA=/dev/vdb + HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC} + console=ttyS0 ..."
-    # Set userdata partition — DATA= followed by closing " or a space
-    sudo sed -i 's/DATA="/DATA=\/dev\/vdb"/g' "$REFIND_CFG"
-    sudo sed -i 's/ DATA= / DATA=\/dev\/vdb /g' "$REFIND_CFG"
-    # HWC + Gralloc — append before closing " on options line (idempotent)
-    sudo sed -i "/^\s*options /{ /HWC=/! s|\"$| HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC}\"|; }" "$REFIND_CFG"
-    # Extra distro-specific kernel params
-    for param in "${DISTRO_EXTRA_PARAMS[@]}"; do
-      key="${param%%=*}"
-      sudo sed -i "/^\s*options /{ /${key}/! s|\"$| ${param}\"|; }" "$REFIND_CFG"
-    done
-    # Caller-supplied extra params (--boot-param)
-    for param in "${EXTRA_BOOT_PARAMS[@]}"; do
-      key="${param%%=*}"
-      sudo sed -i "/^\s*options /{ /${key}/! s|\"$| ${param}\"|; }" "$REFIND_CFG"
-    done
-    # --debug: strip 'quiet', add DEBUG=<level>
-    if [ -n "$DEBUG_LEVEL" ]; then
-      sudo sed -i '/^\s*options /s/ quiet\b//g' "$REFIND_CFG"
-      sudo sed -i "/^\s*options /{ /DEBUG=/! s|\"$| DEBUG=${DEBUG_LEVEL}\"|; }" "$REFIND_CFG"
-      log "Debug boot enabled (DEBUG=${DEBUG_LEVEL}) — type 'exit' at busybox prompt to continue"
-      log "NOTE: expect 'linker: Warning: failed to find generated linker configuration'"
-      log "      from /linkerconfig/ld.config.txt — this is normal at the busybox breakpoint."
-      log "      Android init hasn't run yet; linkerconfig generates that file after 'exit'."
-    fi
-    # --nomodeset: disable DRM/KMS, force software framebuffer
-    if $NOMODESET; then
-      sudo sed -i "/^\s*options /{ /nomodeset/! s|\"$| nomodeset\"|; }" "$REFIND_CFG"
-      log "nomodeset enabled — DRM/KMS disabled, using software framebuffer"
-    fi
-    # Serial console for serial log visibility
-    sudo sed -i "/^\s*options /{ /console=ttyS0/! s|\"$| console=ttyS0,115200n8\"|; }" "$REFIND_CFG"
-    log "rEFInd options after patching:"
-    sudo grep 'options ' "$REFIND_CFG"
+  # Prefer GRUB on the EFI partition (new builds), then GRUB on the Android partition (legacy Android-x86 direct-install)
+  [ -f "$GRUB_CFG_EFI" ]                            && GRUB_CFG="$GRUB_CFG_EFI"
+  [ -z "$GRUB_CFG" ] && [ -f "$GRUB_CFG_ANDROID" ] && GRUB_CFG="$GRUB_CFG_ANDROID"
 
-  elif [ -f "$GRUB_CFG" ]; then
-    # ── GRUB image (images built before the rEFInd switch) ────────────────
-    log "Patching GRUB config (legacy image): DATA=/dev/vdb + HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC} + console=ttyS0 ..."
+  if [ -n "$GRUB_CFG" ]; then
+    # ── GRUB image ────────────────────────────────────────────────────────
+    log "Patching GRUB config (${GRUB_CFG}): DATA=/dev/vdb + HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC} + console=ttyS0 ..."
     sudo sed -i 's/ DATA= / DATA=\/dev\/vdb /g' "$GRUB_CFG"
     sudo sed -i 's/ DATA=$/ DATA=\/dev\/vdb/'   "$GRUB_CFG"
     sudo sed -i "/linux \/kernel/{ /HWC=/! s|$| HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC}|; }" "$GRUB_CFG"
@@ -297,12 +266,10 @@ else
       key="${param%%=*}"
       sudo sed -i "/linux \/kernel/{ /${key}/! s|$| ${param}|; }" "$GRUB_CFG"
     done
-    # Caller-supplied extra params (--boot-param)
     for param in "${EXTRA_BOOT_PARAMS[@]}"; do
       key="${param%%=*}"
       sudo sed -i "/linux \/kernel/{ /${key}/! s|$| ${param}|; }" "$GRUB_CFG"
     done
-    # --debug: strip 'quiet', add DEBUG=<level>
     if [ -n "$DEBUG_LEVEL" ]; then
       sudo sed -i '/linux \/kernel/s/ quiet\b//g' "$GRUB_CFG"
       sudo sed -i "/linux \/kernel/{ /DEBUG=/! s|$| DEBUG=${DEBUG_LEVEL}|; }" "$GRUB_CFG"
@@ -311,7 +278,6 @@ else
       log "      from /linkerconfig/ld.config.txt — this is normal at the busybox breakpoint."
       log "      Android init hasn't run yet; linkerconfig generates that file after 'exit'."
     fi
-    # --nomodeset: disable DRM/KMS, force software framebuffer
     if $NOMODESET; then
       sudo sed -i "/linux \/kernel/{ /nomodeset/! s|$| nomodeset|; }" "$GRUB_CFG"
       log "nomodeset enabled — DRM/KMS disabled, using software framebuffer"
@@ -319,10 +285,41 @@ else
     sudo sed -i '/linux \/kernel/{ /console=ttyS0/! s/$/ console=ttyS0,115200n8/; }' "$GRUB_CFG"
     log "GRUB linux line after patching:"
     sudo grep 'linux ' "$GRUB_CFG" | head -3
-    log "NOTE: this image uses GRUB — rebuild from CI to get rEFInd"
+
+  elif [ -f "$REFIND_CFG" ]; then
+    # ── rEFInd image (backward compatibility for older builds) ────────────
+    log "Patching rEFInd config: DATA=/dev/vdb + HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC} + console=ttyS0 ..."
+    log "NOTE: this image uses rEFInd — rebuild from fetch-distro.sh to switch to GRUB"
+    sudo sed -i 's/DATA="/DATA=\/dev\/vdb"/g' "$REFIND_CFG"
+    sudo sed -i 's/ DATA= / DATA=\/dev\/vdb /g' "$REFIND_CFG"
+    sudo sed -i "/^\s*options /{ /HWC=/! s|\"$| HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC}\"|; }" "$REFIND_CFG"
+    for param in "${DISTRO_EXTRA_PARAMS[@]}"; do
+      key="${param%%=*}"
+      sudo sed -i "/^\s*options /{ /${key}/! s|\"$| ${param}\"|; }" "$REFIND_CFG"
+    done
+    for param in "${EXTRA_BOOT_PARAMS[@]}"; do
+      key="${param%%=*}"
+      sudo sed -i "/^\s*options /{ /${key}/! s|\"$| ${param}\"|; }" "$REFIND_CFG"
+    done
+    if [ -n "$DEBUG_LEVEL" ]; then
+      sudo sed -i '/^\s*options /s/ quiet\b//g' "$REFIND_CFG"
+      sudo sed -i "/^\s*options /{ /DEBUG=/! s|\"$| DEBUG=${DEBUG_LEVEL}\"|; }" "$REFIND_CFG"
+      log "Debug boot enabled (DEBUG=${DEBUG_LEVEL}) — type 'exit' at busybox prompt to continue"
+      log "NOTE: expect 'linker: Warning: failed to find generated linker configuration'"
+      log "      from /linkerconfig/ld.config.txt — this is normal at the busybox breakpoint."
+      log "      Android init hasn't run yet; linkerconfig generates that file after 'exit'."
+    fi
+    if $NOMODESET; then
+      sudo sed -i "/^\s*options /{ /nomodeset/! s|\"$| nomodeset\"|; }" "$REFIND_CFG"
+      log "nomodeset enabled — DRM/KMS disabled, using software framebuffer"
+    fi
+    sudo sed -i "/^\s*options /{ /console=ttyS0/! s|\"$| console=ttyS0,115200n8\"|; }" "$REFIND_CFG"
+    log "rEFInd options after patching:"
+    sudo grep 'options ' "$REFIND_CFG"
 
   else
-    log "WARNING: no bootloader config found (checked rEFInd: ${REFIND_CFG}, GRUB: ${GRUB_CFG})"
+    log "WARNING: no bootloader config found"
+    log "         Checked: ${GRUB_CFG_EFI}, ${GRUB_CFG_ANDROID}, ${REFIND_CFG}"
     log "         Kernel params (DATA=, HWC=, etc.) will NOT be set — VM may not boot correctly"
   fi
 

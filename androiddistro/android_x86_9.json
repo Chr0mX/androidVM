@@ -1,0 +1,39 @@
+{
+  "name": "Android-x86 9.0",
+  "slug": "android_x86_9",
+  "android_version": 9,
+  "arch": "x86_64",
+  "base_image": "android-x86-9-base.qcow2",
+
+  "inject_gapps": false,
+  "inject_arm_trans": false,
+
+  "source": {
+    "type": "direct",
+    "url": "https://sourceforge.net/projects/android-x86/files/Release%209.0/android-x86_64-9.0-r2.iso/download",
+    "filename": "android-x86_64-9.0-r2.iso",
+    "sha256": null
+  },
+
+  "grub": {
+    "hwc": "drm",
+    "gralloc": "gbm",
+    "extra_params": [
+      "vt.global_cursor_default=0",
+      "quiet"
+    ]
+  },
+
+  "qemu": {
+    "preferred_gpu": "virtio-vga",
+    "preferred_display": "gtk,gl=off",
+    "audio_device": "AC97"
+  },
+
+  "notes": [
+    "Official Android-x86 9.0-r2 (Pie) release from android-x86.org",
+    "HWC=drm + GRALLOC=gbm: standard DRM/GBM path for virtio-vga",
+    "ISO ships its own GRUB EFI binary — no external bootloader package needed",
+    "Source: SourceForge ISO — convert to qcow2 via fetch-distro.sh before use"
+  ]
+}

@@ -454,17 +454,7 @@ jobs:
       - name: Assemble bootable disk image
         if: steps.plan.outputs.build == 'true'
         run: |
-          # Fetch rEFInd binary without triggering its post-install boot-setup script
-          cd /tmp
-          apt-get download refind
-          dpkg -x /tmp/refind_*.deb /tmp/refind-pkg/
-          cd $GITHUB_WORKSPACE
-          # Use find — Ubuntu 22.04 puts it in refind/refind/refind_x64.efi (extra subdir)
-          REFIND_BIN=$(find /tmp/refind-pkg -name 'refind_x64.efi' 2>/dev/null | head -1)
-          echo "rEFInd binary: ${REFIND_BIN:-NOT FOUND}"
-          [ -f "$REFIND_BIN" ] || { echo "::error::refind_x64.efi not found in package"; exit 1; }
-
-          SYSTEM_SZ=$(stat -c%s work/system.raw)
+SYSTEM_SZ=$(stat -c%s work/system.raw)
           VENDOR_SZ=$([ -f work/vendor.raw  ] && stat -c%s work/vendor.raw  || echo 0)
           PRODUCT_SZ=$([ -f work/product.raw ] && stat -c%s work/product.raw || echo 0)
           BOOT_SZ=$(find work/ -maxdepth 1 -name 'boot-*' -exec du -sb {} + 2>/dev/null \
@@ -493,28 +483,29 @@ jobs:
           [ -f work/vendor.raw  ] && sudo cp work/vendor.raw  mnt/android/vendor.img  || true
           [ -f work/product.raw ] && sudo cp work/product.raw mnt/android/product.img || true
 
-          # Kernel + initrd on EFI partition (p1) — rEFInd reads FAT32 natively
+          # Kernel + initrd on EFI partition (p1) — GRUB reads FAT32 natively
           [ -f work/boot-kernel      ] && sudo cp work/boot-kernel      mnt/efi/kernel     || true
           [ -f work/boot-ramdisk.img ] && sudo cp work/boot-ramdisk.img mnt/efi/initrd.img || true
           [ -f work/boot-initrd.img  ] && sudo cp work/boot-initrd.img  mnt/efi/initrd.img || true
 
-          # Install rEFInd as the EFI fallback boot entry
+          # Install GRUB EFI from the ISO's own EFI directory (extracted to work/boot-efi/)
+          GRUB_BIN=$(find work/boot-efi/ \( -iname 'bootx64.efi' -o -iname 'grubx64.efi' \) 2>/dev/null | head -1)
+          echo "GRUB binary: ${GRUB_BIN:-NOT FOUND}"
+          [ -f "$GRUB_BIN" ] || { echo "::error::GRUB EFI binary not found in ISO (expected work/boot-efi/BOOT/BOOTx64.EFI)"; exit 1; }
           sudo mkdir -p mnt/efi/EFI/BOOT
-          sudo cp "$REFIND_BIN" mnt/efi/EFI/BOOT/BOOTx64.EFI
+          sudo cp "$GRUB_BIN" mnt/efi/EFI/BOOT/BOOTx64.EFI
 
-          # Write rEFInd config — DATA= and HWC= left empty; set-profile.sh patches per-device
+          # Write GRUB config — DATA= and HWC= left empty; set-profile.sh patches per-device
           DISTRO_NAME=$(jq -r '.name' androiddistro/${{ matrix.distro }}.json)
-          sudo tee mnt/efi/EFI/BOOT/refind.conf > /dev/null << REFINDCFG
-          scanfor manual
-          timeout 3
-          default_selection 1
+          sudo tee mnt/efi/EFI/BOOT/grub.cfg > /dev/null << GRUBCFG
+          set default=0
+          set timeout=3
 
-          menuentry "Boot ${DISTRO_NAME} from EFI" {
-              loader /kernel
+          menuentry "${DISTRO_NAME}" {
+              linux /kernel root=/dev/ram0 androidboot.hardware=android_x86_64 androidboot.selinux=permissive SRC= DATA=
               initrd /initrd.img
-              options "root=/dev/ram0 androidboot.hardware=android_x86_64 androidboot.selinux=permissive SRC= DATA="
           }
-          REFINDCFG
+          GRUBCFG
 
           sudo umount mnt/efi mnt/android
           sudo rmdir  mnt/efi mnt/android
