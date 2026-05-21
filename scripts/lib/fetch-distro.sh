@@ -52,12 +52,7 @@ OUT_IMG="${ROOT}/intermediate/${BASE_IMAGE}"
 log "Distro: ${DISTRO_NAME}  slug=${SLUG}  inject_gapps=${INJECT_GAPPS}"
 log "Output: ${OUT_IMG}"
 
-# ── Idempotency check ─────────────────────────────────────────────────────────
-if [ -f "$OUT_IMG" ] && ! $FORCE; then
-  log "Intermediate image already exists: ${OUT_IMG}"
-  log "Use --force to rebuild it."
-  exit 0
-fi
+SIDECARS_ONLY=false
 
 # ── Resolve ISO URL ────────────────────────────────────────────────────────────
 ISO_URL=""
@@ -86,6 +81,20 @@ esac
 [ -n "$ISO_URL" ] || die "Could not determine ISO URL for ${SLUG}"
 log "ISO URL:  ${ISO_URL}"
 log "Filename: ${ISO_FILENAME}"
+
+# ── Idempotency / sidecar check ───────────────────────────────────────────────
+if [ -f "$OUT_IMG" ] && ! $FORCE; then
+  _base="${BASE_IMAGE%.qcow2}"
+  if [ -f "${ROOT}/intermediate/${_base}-kernel" ] \
+  && [ -f "${ROOT}/intermediate/${_base}-initrd.img" ] \
+  && [ -f "${ROOT}/intermediate/${_base}-cmdline" ]; then
+    log "Intermediate image and boot sidecars already exist: ${OUT_IMG}"
+    log "Use --force to rebuild."
+    exit 0
+  fi
+  log "Intermediate image exists but boot sidecars are missing — extracting from cached ISO..."
+  SIDECARS_ONLY=true
+fi
 
 # ── GApps resolution ──────────────────────────────────────────────────────────
 GAPPS_ZIP=""
@@ -205,6 +214,8 @@ done
 
 sudo umount "${WORK}/iso-mount"
 rmdir "${WORK}/iso-mount"
+
+if ! $SIDECARS_ONLY; then
 
 [ "$FOUND" -gt 0 ] || die "No partition images (.sfs or .img) found in ISO"
 log "Extracted ${FOUND} partition image(s)"
@@ -366,6 +377,8 @@ qemu-img info "$OUT_IMG"
 
 log "Recording checksum..."
 sha256sum "$OUT_IMG" >> "${ROOT}/checksums.sha256"
+
+fi  # end if ! $SIDECARS_ONLY
 
 # ── Extract boot sidecars (kernel, initrd, cmdline) ──────────────────────────
 BASE_NAME="${BASE_IMAGE%.qcow2}"
