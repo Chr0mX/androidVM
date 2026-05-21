@@ -258,7 +258,9 @@ qemu-system-x86_64 \
   -m "${RAM_MB}" \
   "${HUGEPAGES_FLAGS[@]}" \
   -machine pc-q35-10.0,vmport=off \
-  -drive "file=${IMG},if=scsi,index=0,${IMG_SNAPSHOT}" \
+  -device virtio-scsi-pci,id=scsi0 \
+  -drive "file=${IMG},if=none,id=hd0,${IMG_SNAPSHOT}" \
+  -device "scsi-hd,drive=hd0,bus=scsi0.0" \
   "${GPU_FLAGS[@]}" \
   "${DISPLAY_FLAGS[@]}" \
   "${AUDIO_FLAGS[@]}" \
