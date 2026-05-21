@@ -84,14 +84,11 @@ fi
 [ -f "$DISTRO_FILE" ] || die "Distro not found: $DISTRO_FILE"
 command -v jq &>/dev/null || die "jq is required but not installed"
 
-DISTRO_BASE_IMAGE=$(jq -r '.base_image'    "$DISTRO_FILE")
-DISTRO_HWC=$(       jq -r '.grub.hwc'      "$DISTRO_FILE")
-DISTRO_GRALLOC=$(   jq -r '.grub.gralloc'  "$DISTRO_FILE")
-mapfile -t DISTRO_EXTRA_PARAMS < <(jq -r '.grub.extra_params[]?' "$DISTRO_FILE")
+DISTRO_BASE_IMAGE=$(jq -r '.base_image' "$DISTRO_FILE")
 
 INTERMEDIATE="${ROOT}/intermediate/${DISTRO_BASE_IMAGE}"
 
-log "Distro: $(jq -r '.name' "$DISTRO_FILE")  (HWC=${DISTRO_HWC}  GRALLOC=${DISTRO_GRALLOC})"
+log "Distro: $(jq -r '.name' "$DISTRO_FILE")  (GRUB options preserved from ISO)"
 
 # ── Preconditions ──────────────────────────────────────────────────────────
 [ -f "$PROFILE_FILE" ]  || die "Profile not found: $PROFILE_FILE"
@@ -260,15 +257,12 @@ else
 
   if [ "${#GRUB_CFGS[@]}" -gt 0 ]; then
     # ── GRUB image(s) ─────────────────────────────────────────────────────────
-    log "Patching ${#GRUB_CFGS[@]} GRUB config(s): DATA=/dev/vdb + HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC} + console=ttyS0 ..."
+    # HWC, GRALLOC, quiet, and other distro params come from the ISO's grub.cfg.
+    # We only set DATA= (userdata disk) and add console= (headless QEMU serial).
+    log "Patching ${#GRUB_CFGS[@]} GRUB config(s): DATA=/dev/vdb + console=ttyS0 ..."
     for GRUB_CFG in "${GRUB_CFGS[@]}"; do
-      sudo sed -i 's/ DATA= / DATA=\/dev\/vdb /g' "$GRUB_CFG"
-      sudo sed -i 's/ DATA=$/ DATA=\/dev\/vdb/'   "$GRUB_CFG"
-      sudo sed -i "/linux \/kernel/{ /HWC=/! s|$| HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC}|; }" "$GRUB_CFG"
-      for param in "${DISTRO_EXTRA_PARAMS[@]}"; do
-        key="${param%%=*}"
-        sudo sed -i "/linux \/kernel/{ /${key}/! s|$| ${param}|; }" "$GRUB_CFG"
-      done
+      # Replace DATA= regardless of whether it is empty or already set to something
+      sudo sed -i 's|DATA=[^ ]*|DATA=/dev/vdb|g' "$GRUB_CFG"
       for param in "${EXTRA_BOOT_PARAMS[@]}"; do
         key="${param%%=*}"
         sudo sed -i "/linux \/kernel/{ /${key}/! s|$| ${param}|; }" "$GRUB_CFG"
@@ -296,15 +290,9 @@ else
 
   elif [ -f "$REFIND_CFG" ]; then
     # ── rEFInd image (backward compatibility for pre-GRUB builds) ─────────
-    log "Patching rEFInd config: DATA=/dev/vdb + HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC} + console=ttyS0 ..."
+    log "Patching rEFInd config: DATA=/dev/vdb + console=ttyS0 ..."
     log "NOTE: this image uses rEFInd — rebuild from fetch-distro.sh to switch to GRUB"
-    sudo sed -i 's/DATA="/DATA=\/dev\/vdb"/g' "$REFIND_CFG"
-    sudo sed -i 's/ DATA= / DATA=\/dev\/vdb /g' "$REFIND_CFG"
-    sudo sed -i "/^\s*options /{ /HWC=/! s|\"$| HWC=${DISTRO_HWC} GRALLOC=${DISTRO_GRALLOC}\"|; }" "$REFIND_CFG"
-    for param in "${DISTRO_EXTRA_PARAMS[@]}"; do
-      key="${param%%=*}"
-      sudo sed -i "/^\s*options /{ /${key}/! s|\"$| ${param}\"|; }" "$REFIND_CFG"
-    done
+    sudo sed -i 's|DATA=[^ "]*|DATA=/dev/vdb|g' "$REFIND_CFG"
     for param in "${EXTRA_BOOT_PARAMS[@]}"; do
       key="${param%%=*}"
       sudo sed -i "/^\s*options /{ /${key}/! s|\"$| ${param}\"|; }" "$REFIND_CFG"

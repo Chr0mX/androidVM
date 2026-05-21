@@ -376,12 +376,30 @@ sudo mkdir -p "${WORK}/mnt/efi/EFI/BOOT" "${WORK}/mnt/android/boot/grub"
 sudo cp "$GRUB_EFI" "${WORK}/mnt/efi/EFI/BOOT/BOOTx64.EFI"
 log "GRUB EFI: $(basename "$GRUB_EFI") → EFI/BOOT/BOOTx64.EFI"
 
-# Write grub.cfg to BOTH partitions — DATA= and HWC= left empty; set-profile.sh patches
-# per-device.  EFI copy covers GRUB binaries with prefix=/EFI/BOOT; android copy covers
-# Android-x86-derived binaries whose embedded startup searches for system.img and then
-# loads /boot/grub/grub.cfg on that partition.
-DISTRO_DISPLAY_NAME=$(jq -r '.name' "$DISTRO_FILE")
-sudo tee "${WORK}/mnt/efi/EFI/BOOT/grub.cfg" "${WORK}/mnt/android/boot/grub/grub.cfg" > /dev/null <<GRUBCFG
+# Copy grub.cfg from the ISO to both partitions, preserving the distro's original
+# menu entries, HWC/GRALLOC, quiet, timeouts, and any debug entries.
+# set-profile.sh will only patch DATA= and add console=ttyS0 on top.
+#
+# Priority: UEFI copy (clean /kernel paths) > BIOS copy (may have (loop)/ prefixes).
+ISO_GRUB_CFG=""
+[ -f "${WORK}/boot-efi/EFI/BOOT/grub.cfg" ] && ISO_GRUB_CFG="${WORK}/boot-efi/EFI/BOOT/grub.cfg"
+[ -z "$ISO_GRUB_CFG" ] && [ -f "${WORK}/boot-grub/grub.cfg" ] && ISO_GRUB_CFG="${WORK}/boot-grub/grub.cfg"
+
+if [ -n "$ISO_GRUB_CFG" ]; then
+  log "Using ISO grub.cfg: ${ISO_GRUB_CFG}"
+  # Normalize any ISO-device path prefixes on linux/initrd lines so they work on a
+  # flat FAT32/ext4 disk — e.g. "(loop)/kernel" or "(hd0,gpt1)/kernel" → "/kernel".
+  sudo sed -E \
+    -e 's|^(\s*linux\s+)\([^)]+\)/|\1/|' \
+    -e 's|^(\s*initrd\s+)\([^)]+\)/|\1/|' \
+    "$ISO_GRUB_CFG" \
+    | sudo tee "${WORK}/mnt/efi/EFI/BOOT/grub.cfg" \
+               "${WORK}/mnt/android/boot/grub/grub.cfg" > /dev/null
+else
+  log "ISO grub.cfg not found — writing minimal fallback config"
+  DISTRO_DISPLAY_NAME=$(jq -r '.name' "$DISTRO_FILE")
+  sudo tee "${WORK}/mnt/efi/EFI/BOOT/grub.cfg" \
+           "${WORK}/mnt/android/boot/grub/grub.cfg" > /dev/null <<GRUBCFG
 set default=0
 set timeout=3
 
@@ -390,6 +408,7 @@ menuentry "${DISTRO_DISPLAY_NAME}" {
     initrd /initrd.img
 }
 GRUBCFG
+fi
 
 sudo umount "${WORK}/mnt/efi"    "${WORK}/mnt/android"
 sudo rmdir  "${WORK}/mnt/efi"    "${WORK}/mnt/android"

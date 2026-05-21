@@ -15,15 +15,6 @@
     "sha256": null
   },
 
-  "grub": {
-    "hwc": "drm",
-    "gralloc": "gbm",
-    "extra_params": [
-      "vt.global_cursor_default=0",
-      "quiet"
-    ]
-  },
-
   "qemu": {
     "preferred_gpu": "virtio-vga",
     "preferred_display": "gtk,gl=off",
