@@ -57,7 +57,7 @@ env:
   GAPPS_SHA256: ""
   ARM_TRANS_COMMIT: "9324a8914b649b885dad6f2bfd14a67e5d1520bf"
   # Increment BUILD_VERSION whenever build logic changes to invalidate all caches.
-  BUILD_VERSION: "5"
+  BUILD_VERSION: "6"
 
 jobs:
   # ─── Job 1: compute distro matrix ────────────────────────────────────────
