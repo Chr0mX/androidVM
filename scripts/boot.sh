@@ -119,9 +119,9 @@ CMDLINE_FILE="${ROOT}/builds/android11-${PROFILE_NAME}-cmdline"
 [ -f "$CMDLINE_FILE" ] || die "Cmdline sidecar not found: $CMDLINE_FILE — run: bash scripts/set-profile.sh ${PROFILE_NAME} --rebuild"
 
 ISO_PARAMS=$(cat "$CMDLINE_FILE")
-APPEND="root=/dev/ram0 ${ISO_PARAMS} SRC= DATA=/dev/sda2 console=ttyS0,115200n8 androidboot.enable_console=1"
+APPEND="root=/dev/ram0 ${ISO_PARAMS} SRC= DATA=/dev/sda2 console=ttyS0,115200n8"
 if [ -n "$DEBUG_LEVEL" ]; then
-  APPEND="${APPEND} DEBUG=${DEBUG_LEVEL}"
+  APPEND="${APPEND} androidboot.enable_console=1 DEBUG=${DEBUG_LEVEL}"
   echo "[boot] Debug boot: DEBUG=${DEBUG_LEVEL} (type 'exit' at busybox prompt to continue)"
 else
   APPEND="${APPEND} quiet"

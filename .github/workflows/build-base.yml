@@ -522,25 +522,38 @@ jobs:
           [ -f "work/boot-efi/EFI/BOOT/grub.cfg" ] && _ISO_GRUB_CFG="work/boot-efi/EFI/BOOT/grub.cfg"
           [ -z "$_ISO_GRUB_CFG" ] && [ -f "work/boot-grub/grub.cfg" ] && _ISO_GRUB_CFG="work/boot-grub/grub.cfg"
 
+          # ISOLINUX fallback (BlissOS 14 / Android-x86 ISOs)
+          _ISO_ISOLINUX_CFG=""
+          for _icfg in "work/boot-isolinux/isolinux.cfg" \
+                       "work/boot-isolinux/android.cfg" \
+                       "work/boot-isolinux/default.cfg"; do
+            [ -f "$_icfg" ] && { _ISO_ISOLINUX_CFG="$_icfg"; break; }
+          done
+
           _linux_line=""
           for _cfg in "$ISO_ANDROID_CFG" ${_ISO_GRUB_CFG:+"$_ISO_GRUB_CFG"}; do
             [ -f "$_cfg" ] || continue
             _line=$(grep -m1 -E '^\s*linux\s' "$_cfg" 2>/dev/null || true)
             if [ -n "$_line" ]; then _linux_line="$_line"; break; fi
           done
+          if [ -z "$_linux_line" ] && [ -n "$_ISO_ISOLINUX_CFG" ]; then
+            _append_line=$(grep -m1 -iE '^\s*APPEND\s' "$_ISO_ISOLINUX_CFG" 2>/dev/null || true)
+            [ -n "$_append_line" ] && \
+              _linux_line="linux /kernel $(echo "$_append_line" | sed -E 's/^\s*APPEND\s+//')"
+          fi
 
           if [ -n "$_linux_line" ]; then
             echo "$_linux_line" \
               | sed -E 's/^\s*linux\s+\S+\s*//' \
               | tr ' ' '\n' \
-              | grep -vE '^(root=|SRC=|DATA=|BOOT_IMAGE=|console=|quiet$|nomodeset$)$' \
+              | grep -vE '^(root=|SRC=|DATA=|BOOT_IMAGE=|console=|quiet$|nomodeset$|androidboot\.enable_console=)' \
               | grep -v '^$' \
               | tr '\n' ' ' \
               | sed 's/[[:space:]]*$//' \
               > "image-cache/${BASE_NAME}-cmdline"
             echo "Cmdline: $(cat "image-cache/${BASE_NAME}-cmdline")"
           else
-            echo "::warning::No linux line found in ISO config — using default cmdline"
+            echo "::warning::No linux/APPEND line found in ISO config — using default cmdline"
             echo "androidboot.hardware=android_x86_64 androidboot.selinux=permissive" \
               > "image-cache/${BASE_NAME}-cmdline"
           fi

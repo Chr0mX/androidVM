@@ -407,25 +407,43 @@ _ISO_GRUB_CFG=""
 [ -f "${WORK}/boot-efi/EFI/BOOT/grub.cfg" ] && _ISO_GRUB_CFG="${WORK}/boot-efi/EFI/BOOT/grub.cfg"
 [ -z "$_ISO_GRUB_CFG" ] && [ -f "${WORK}/boot-grub/grub.cfg" ] && _ISO_GRUB_CFG="${WORK}/boot-grub/grub.cfg"
 
+# ISOLINUX config (BlissOS 14 and many Android-x86 ISOs use ISOLINUX rather
+# than GRUB — boot params live in an APPEND line, not a 'linux' line).
+_ISO_ISOLINUX_CFG=""
+for _icfg in "${WORK}/boot-isolinux/isolinux.cfg" \
+             "${WORK}/boot-isolinux/android.cfg" \
+             "${WORK}/boot-isolinux/default.cfg"; do
+  [ -f "$_icfg" ] && { _ISO_ISOLINUX_CFG="$_icfg"; break; }
+done
+
 _linux_line=""
+# Prefer GRUB/EFI configs first (BlissOS 15 style)
 for _cfg in "$ISO_ANDROID_CFG" ${_ISO_GRUB_CFG:+"$_ISO_GRUB_CFG"}; do
   [ -f "$_cfg" ] || continue
   _line=$(grep -m1 -E '^\s*linux\s' "$_cfg" 2>/dev/null || true)
   if [ -n "$_line" ]; then _linux_line="$_line"; break; fi
 done
+# Fall back to ISOLINUX APPEND syntax (BlissOS 14 / Android-x86 style)
+if [ -z "$_linux_line" ] && [ -n "$_ISO_ISOLINUX_CFG" ]; then
+  _append_line=$(grep -m1 -iE '^\s*APPEND\s' "$_ISO_ISOLINUX_CFG" 2>/dev/null || true)
+  if [ -n "$_append_line" ]; then
+    # Reformat as a fake 'linux /kernel <params>' so the strip below works
+    _linux_line="linux /kernel $(echo "$_append_line" | sed -E 's/^\s*APPEND\s+//')"
+  fi
+fi
 
 if [ -n "$_linux_line" ]; then
   echo "$_linux_line" \
     | sed -E 's/^\s*linux\s+\S+\s*//' \
     | tr ' ' '\n' \
-    | grep -vE '^(root=|SRC=|DATA=|BOOT_IMAGE=|console=|quiet$|nomodeset$)$' \
+    | grep -vE '^(root=|SRC=|DATA=|BOOT_IMAGE=|console=|quiet$|nomodeset$|androidboot\.enable_console=)' \
     | grep -v '^$' \
     | tr '\n' ' ' \
     | sed 's/[[:space:]]*$//' \
     > "$SIDECAR_CMDLINE"
   log "Cmdline sidecar: $(cat "$SIDECAR_CMDLINE")"
 else
-  warn "No 'linux' line found in ISO config — using default cmdline"
+  warn "No 'linux'/'APPEND' line found in ISO config — using default cmdline"
   echo "androidboot.hardware=android_x86_64 androidboot.selinux=permissive" > "$SIDECAR_CMDLINE"
 fi
 
