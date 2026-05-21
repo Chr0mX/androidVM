@@ -22,11 +22,13 @@ OWNER_REPO="${1:?Usage: fetch-release.sh <owner/repo> <asset-pattern> <dest-dir>
 PATTERN="${2:?}"
 DEST_DIR="${3:?}"
 TAG_PREFIX=""
+ALSO_FILES=()
 
 shift 3 || true
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --tag-prefix) TAG_PREFIX="${2:?--tag-prefix requires a value}"; shift 2 ;;
+    --also)       ALSO_FILES+=("${2:?--also requires a value}");   shift 2 ;;
     *) echo "[fetch-release] Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -200,6 +202,24 @@ fetch_via_api() {
   fi
 
   log "Done: ${dest_file} ($(du -sh "$dest_file" | cut -f1))"
+
+  # Download companion files (--also) from the same release tag without a
+  # second API lookup.
+  for extra_file in "${ALSO_FILES[@]+"${ALSO_FILES[@]}"}"; do
+    local extra_dest="${dest_dir}/${extra_file}"
+    if [ -f "$extra_dest" ]; then
+      log "${extra_file} already present — skipping"
+      continue
+    fi
+    if url_exists "${base_url}/${extra_file}"; then
+      log "Downloading: ${extra_file}"
+      download_file "${base_url}/${extra_file}" "${extra_dest}.tmp"
+      mv "${extra_dest}.tmp" "$extra_dest"
+      log "Done: ${extra_file} ($(du -sh "$extra_dest" | cut -f1))"
+    else
+      warn "${extra_file} not found in release ${tag} — skipping"
+    fi
+  done
 }
 
 # ── Main ───────────────────────────────────────────────────────────────────────

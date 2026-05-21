@@ -287,10 +287,14 @@ cmd_update() {
         local slug base_image
         slug=$(       jq -r '.slug'       "$distro_cfg" 2>/dev/null) || continue
         base_image=$( jq -r '.base_image' "$distro_cfg" 2>/dev/null) || continue
+        local base_name="${base_image%.qcow2}"
         log "Checking for updated intermediate: ${slug} (${base_image})..."
         ROOT="${ROOT}" bash "$fetch_script" \
           "$owner_repo" "${base_image}*" "${ROOT}/intermediate/" \
           --tag-prefix "${slug}-base-" \
+          --also "${base_name}-kernel" \
+          --also "${base_name}-initrd.img" \
+          --also "${base_name}-cmdline" \
           && updated=$(( updated + 1 )) \
           || warn "No GitHub Release found for '${slug}' — build locally: bash scripts/lib/fetch-distro.sh ${slug}"
       done
