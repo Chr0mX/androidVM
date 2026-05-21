@@ -7,28 +7,17 @@
 #   --rebuild             Force recreation even if a same-day build already exists
 #   --boot                Launch the VM after building
 #   --check               Run verify.sh against the booted VM
-#   --boot-param <param>  Append an extra kernel parameter (repeatable)
-#   --debug [1|2]         Debug boot: add DEBUG=<level>, remove 'quiet'.
-#                           Level 1 (default): busybox shell before Android init — type 'exit' to continue
-#                           Level 2: additional shell breakpoints at each init stage
-#                           Ref: https://docs.blissos.org/knowledgebase/troubleshooting/debug-booting/
-#   --nomodeset           Graphics debug: disable DRM/KMS, force software framebuffer (VGA/VESA).
-#                           Use when display is black or GPU init hangs.
-#                           Ref: https://docs.blissos.org/knowledgebase/troubleshooting/graphics-troubleshooting/
 set -euo pipefail
 IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-PROFILE_NAME="${1:?Usage: set-profile.sh <profile-name> [--distro <name>] [--rebuild] [--boot] [--check] [--boot-param <param>] [--debug [1|2]] [--nomodeset]}"
+PROFILE_NAME="${1:?Usage: set-profile.sh <profile-name> [--distro <name>] [--rebuild] [--boot] [--check]}"
 DISTRO_NAME="bliss14"
 REBUILD=false
 BOOT=false
 CHECK=false
-EXTRA_BOOT_PARAMS=()
-DEBUG_LEVEL=""   # empty = no debug; "1" or "2" = DEBUG=<level> + strip quiet
-NOMODESET=false
 
 shift
 while [[ $# -gt 0 ]]; do
@@ -37,13 +26,6 @@ while [[ $# -gt 0 ]]; do
     --rebuild)    REBUILD=true;  shift ;;
     --boot)       BOOT=true;     shift ;;
     --check)      CHECK=true;    shift ;;
-    --boot-param) EXTRA_BOOT_PARAMS+=("${2:?--boot-param requires a value}"); shift 2 ;;
-    --nomodeset)  NOMODESET=true; shift ;;
-    --debug)
-      DEBUG_LEVEL="1"
-      shift
-      if [[ "${1:-}" =~ ^[12]$ ]]; then DEBUG_LEVEL="$1"; shift; fi
-      ;;
     *) echo "[set-profile] Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -53,15 +35,13 @@ DISTRO_FILE="${ROOT}/androiddistro/${DISTRO_NAME}.json"
 OUT_IMG="${ROOT}/builds/android11-${PROFILE_NAME}-$(date +%Y%m%d).qcow2"
 LATEST_LINK="${ROOT}/builds/android11-${PROFILE_NAME}-latest.qcow2"
 
-# p1 = EFI FAT32 partition (GRUB binary + grub.cfg + kernel + initrd)
-MNT_EFI="${ROOT}/mnt/efi"
-# p2 = Android data partition (system.img, vendor.img, etc.; also kernel + initrd + boot/grub/grub.cfg)
+# p1 = Android data partition (system.img, vendor.img, etc.)
 MNT_ANDROID="${ROOT}/mnt/android"
-# Loop-mounted from system.img on p2
+# Loop-mounted from system.img on p1
 MNT_SYSTEM="${ROOT}/mnt/system"
-# Loop-mounted from vendor.img on p2 (if a separate vendor.img exists)
+# Loop-mounted from vendor.img on p1 (if a separate vendor.img exists)
 MNT_VENDOR="${ROOT}/mnt/vendor"
-# Loop-mounted from product.img on p2 (if a separate product.img exists)
+# Loop-mounted from product.img on p1 (if a separate product.img exists)
 MNT_PRODUCT="${ROOT}/mnt/product"
 
 log() { echo "[set-profile] $*"; }
@@ -88,7 +68,7 @@ DISTRO_BASE_IMAGE=$(jq -r '.base_image' "$DISTRO_FILE")
 
 INTERMEDIATE="${ROOT}/intermediate/${DISTRO_BASE_IMAGE}"
 
-log "Distro: $(jq -r '.name' "$DISTRO_FILE")  (GRUB options preserved from ISO)"
+log "Distro: $(jq -r '.name' "$DISTRO_FILE")"
 
 # ── Preconditions ──────────────────────────────────────────────────────────
 [ -f "$PROFILE_FILE" ]  || die "Profile not found: $PROFILE_FILE"
@@ -122,9 +102,8 @@ else
   sudo qemu-nbd --connect=/dev/nbd0 "$OUT_IMG"
   sleep 2
 
-  mkdir -p "$MNT_EFI" "$MNT_ANDROID" "$MNT_SYSTEM" "$MNT_VENDOR" "$MNT_PRODUCT"
+  mkdir -p "$MNT_ANDROID" "$MNT_SYSTEM" "$MNT_VENDOR" "$MNT_PRODUCT"
 
-  EFI_MOUNTED=false
   SYSTEM_IMG_MOUNTED=false
   VENDOR_IMG_MOUNTED=false
   PRODUCT_IMG_MOUNTED=false
@@ -135,7 +114,6 @@ else
     $VENDOR_IMG_MOUNTED  && sudo umount "$MNT_VENDOR"  2>/dev/null || true
     $SYSTEM_IMG_MOUNTED  && sudo umount "$MNT_SYSTEM"  2>/dev/null || true
     sudo umount "$MNT_ANDROID" 2>/dev/null || true
-    $EFI_MOUNTED         && sudo umount "$MNT_EFI"     2>/dev/null || true
     sudo qemu-nbd --disconnect /dev/nbd0 2>/dev/null || true
   }
   trap cleanup EXIT
@@ -143,12 +121,8 @@ else
   log "Partition layout:"
   lsblk /dev/nbd0
 
-  # p1 = EFI FAT32 partition (GRUB binary + grub.cfg + kernel + initrd)
-  sudo mount /dev/nbd0p1 "$MNT_EFI"
-  EFI_MOUNTED=true
-
-  # p2 = Android data partition (system.img, vendor.img, etc.)
-  sudo mount /dev/nbd0p2 "$MNT_ANDROID"
+  # p1 = Android data partition (system.img, vendor.img, etc.)
+  sudo mount /dev/nbd0p1 "$MNT_ANDROID"
 
   # Loop-mount the inner system.img to reach the actual Android system files
   if [ -f "${MNT_ANDROID}/system.img" ]; then
@@ -243,84 +217,6 @@ else
     log "Device spoofing disabled (device-spoof.json: enabled=false) — skipping prop patching"
   fi
 
-  # ── Patch bootloader config ───────────────────────────────────────────────
-  GRUB_CFGS=()
-  GRUB_CFG_EFI="${MNT_EFI}/EFI/BOOT/grub.cfg"
-  GRUB_CFG_ANDROID="${MNT_ANDROID}/boot/grub/grub.cfg"
-  REFIND_CFG="${MNT_EFI}/EFI/BOOT/refind.conf"
-
-  # Patch every grub.cfg present — new builds have copies on both the EFI partition
-  # and the android data partition so GRUB finds its config regardless of which
-  # partition its embedded prefix resolves to.
-  [ -f "$GRUB_CFG_EFI" ]     && GRUB_CFGS+=("$GRUB_CFG_EFI")
-  [ -f "$GRUB_CFG_ANDROID" ] && GRUB_CFGS+=("$GRUB_CFG_ANDROID")
-
-  if [ "${#GRUB_CFGS[@]}" -gt 0 ]; then
-    # ── GRUB image(s) ─────────────────────────────────────────────────────────
-    # HWC, GRALLOC, quiet, and other distro params come from the ISO's grub.cfg.
-    # We only set DATA= (userdata disk) and add console= (headless QEMU serial).
-    log "Patching ${#GRUB_CFGS[@]} GRUB config(s): DATA=/dev/sda3 + console=ttyS0 ..."
-    for GRUB_CFG in "${GRUB_CFGS[@]}"; do
-      # Replace DATA= regardless of whether it is empty or already set to something
-      sudo sed -i 's|DATA=[^ ]*|DATA=/dev/sda3|g' "$GRUB_CFG"
-      for param in "${EXTRA_BOOT_PARAMS[@]}"; do
-        key="${param%%=*}"
-        sudo sed -i "/linux \/kernel/{ /${key}/! s|$| ${param}|; }" "$GRUB_CFG"
-      done
-      if [ -n "$DEBUG_LEVEL" ]; then
-        sudo sed -i '/linux \/kernel/s/ quiet\b//g' "$GRUB_CFG"
-        sudo sed -i "/linux \/kernel/{ /DEBUG=/! s|$| DEBUG=${DEBUG_LEVEL}|; }" "$GRUB_CFG"
-      fi
-      if $NOMODESET; then
-        sudo sed -i "/linux \/kernel/{ /nomodeset/! s|$| nomodeset|; }" "$GRUB_CFG"
-      fi
-      sudo sed -i '/linux \/kernel/{ /console=ttyS0/! s/$/ console=ttyS0,115200n8/; }' "$GRUB_CFG"
-    done
-    if [ -n "$DEBUG_LEVEL" ]; then
-      log "Debug boot enabled (DEBUG=${DEBUG_LEVEL}) — type 'exit' at busybox prompt to continue"
-      log "NOTE: expect 'linker: Warning: failed to find generated linker configuration'"
-      log "      from /linkerconfig/ld.config.txt — this is normal at the busybox breakpoint."
-      log "      Android init hasn't run yet; linkerconfig generates that file after 'exit'."
-    fi
-    if $NOMODESET; then
-      log "nomodeset enabled — DRM/KMS disabled, using software framebuffer"
-    fi
-    log "GRUB linux line after patching:"
-    sudo grep 'linux ' "${GRUB_CFGS[0]}" | head -3
-
-  elif [ -f "$REFIND_CFG" ]; then
-    # ── rEFInd image (backward compatibility for pre-GRUB builds) ─────────
-    log "Patching rEFInd config: DATA=/dev/sda3 + console=ttyS0 ..."
-    log "NOTE: this image uses rEFInd — rebuild from fetch-distro.sh to switch to GRUB"
-    sudo sed -i 's|DATA=[^ "]*|DATA=/dev/sda3|g' "$REFIND_CFG"
-    for param in "${EXTRA_BOOT_PARAMS[@]}"; do
-      key="${param%%=*}"
-      sudo sed -i "/^\s*options /{ /${key}/! s|\"$| ${param}\"|; }" "$REFIND_CFG"
-    done
-    if [ -n "$DEBUG_LEVEL" ]; then
-      sudo sed -i '/^\s*options /s/ quiet\b//g' "$REFIND_CFG"
-      sudo sed -i "/^\s*options /{ /DEBUG=/! s|\"$| DEBUG=${DEBUG_LEVEL}\"|; }" "$REFIND_CFG"
-      log "Debug boot enabled (DEBUG=${DEBUG_LEVEL}) — type 'exit' at busybox prompt to continue"
-      log "NOTE: expect 'linker: Warning: failed to find generated linker configuration'"
-      log "      from /linkerconfig/ld.config.txt — this is normal at the busybox breakpoint."
-      log "      Android init hasn't run yet; linkerconfig generates that file after 'exit'."
-    fi
-    if $NOMODESET; then
-      sudo sed -i "/^\s*options /{ /nomodeset/! s|\"$| nomodeset\"|; }" "$REFIND_CFG"
-      log "nomodeset enabled — DRM/KMS disabled, using software framebuffer"
-    fi
-    sudo sed -i "/^\s*options /{ /console=ttyS0/! s|\"$| console=ttyS0,115200n8\"|; }" "$REFIND_CFG"
-    log "rEFInd options after patching:"
-    sudo grep 'options ' "$REFIND_CFG"
-
-  else
-    log "WARNING: no bootloader config found"
-    log "         Checked: ${GRUB_CFG_EFI}"
-    log "                  ${GRUB_CFG_ANDROID}"
-    log "                  ${REFIND_CFG}"
-    log "         Kernel params (DATA=, HWC=, etc.) will NOT be set — VM may not boot correctly"
-  fi
-
   # ── Cleanup via trap ──────────────────────────────────────────────────────
   log "Sealing partitions ..."
 
@@ -337,6 +233,19 @@ else
   echo "$DISTRO_NAME" > "${ROOT}/builds/android11-${PROFILE_NAME}.distro"
   log "Latest → $OUT_IMG"
 fi
+
+# ── Copy boot sidecars ─────────────────────────────────────────────────────
+BASE_NAME="${DISTRO_BASE_IMAGE%.qcow2}"
+INTER_KERNEL="${ROOT}/intermediate/${BASE_NAME}-kernel"
+INTER_INITRD="${ROOT}/intermediate/${BASE_NAME}-initrd.img"
+INTER_CMDLINE="${ROOT}/intermediate/${BASE_NAME}-cmdline"
+for _sidecar in "$INTER_KERNEL" "$INTER_INITRD" "$INTER_CMDLINE"; do
+  [ -f "$_sidecar" ] || die "Boot sidecar not found: $_sidecar — rebuild intermediate: bash scripts/lib/fetch-distro.sh ${DISTRO_NAME} --force"
+done
+cp "$INTER_KERNEL"  "${ROOT}/builds/android11-${PROFILE_NAME}-kernel"
+cp "$INTER_INITRD"  "${ROOT}/builds/android11-${PROFILE_NAME}-initrd.img"
+cp "$INTER_CMDLINE" "${ROOT}/builds/android11-${PROFILE_NAME}-cmdline"
+log "Boot sidecars copied: kernel initrd.img cmdline"
 
 # ── Boot ───────────────────────────────────────────────────────────────────
 if $BOOT; then

@@ -48,8 +48,6 @@ done
 # ── Config: defaults.json ─────────────────────────────────────────────────────
 DEFAULTS_JSON="${ROOT}/config/defaults.json"
 ADB_PORT=$(jq -r '.adb_port // 5555' "$DEFAULTS_JSON" 2>/dev/null || echo "5555")
-USERDATA_SIZE=$(jq -r '.userdata_size // "8G"' "$DEFAULTS_JSON" 2>/dev/null || echo "8G")
-OVMF_PATH=$(jq -r '.ovmf_path // empty' "$DEFAULTS_JSON" 2>/dev/null || true)
 
 # ── Resolve VM hardware profile ───────────────────────────────────────────────
 if [ -z "$VM_PROFILE_NAME" ]; then
@@ -93,65 +91,28 @@ fi
 [ -n "$OVERRIDE_AUDIO" ]    && AUDIO="$OVERRIDE_AUDIO"
 [ -n "$OVERRIDE_ADB_PORT" ] && ADB_PORT="$OVERRIDE_ADB_PORT"
 
-# ── OVMF firmware resolution ──────────────────────────────────────────────────
-if [ -z "$OVMF_PATH" ] || [ ! -f "$OVMF_PATH" ]; then
-  for candidate in \
-      /usr/share/OVMF/OVMF_CODE_4M.fd \
-      /usr/share/OVMF/OVMF_CODE.fd \
-      /usr/share/ovmf/OVMF.fd \
-      /usr/share/OVMF/OVMF_4M.fd \
-      /usr/share/qemu/OVMF.fd \
-      /usr/share/edk2/ovmf/OVMF_CODE.fd; do
-    if [ -f "$candidate" ]; then
-      OVMF_PATH="$candidate"
-      break
-    fi
-  done
-fi
-[ -f "${OVMF_PATH:-}" ] || {
-  echo "[gen-libvirt-xml] ERROR: OVMF firmware not found. Install: sudo apt install ovmf" >&2
+# ── Boot sidecars ─────────────────────────────────────────────────────────────
+KERNEL="${ROOT}/builds/android11-${PROFILE_NAME}-kernel"
+INITRD="${ROOT}/builds/android11-${PROFILE_NAME}-initrd.img"
+CMDLINE_FILE="${ROOT}/builds/android11-${PROFILE_NAME}-cmdline"
+
+if [ ! -f "$KERNEL" ] || [ ! -f "$INITRD" ] || [ ! -f "$CMDLINE_FILE" ]; then
+  echo "[gen-libvirt-xml] ERROR: Boot sidecars not found for '${PROFILE_NAME}'" >&2
+  echo "[gen-libvirt-xml] Run: bash scripts/set-profile.sh ${PROFILE_NAME} --rebuild" >&2
   exit 1
-}
-
-OVMF_VARS_TEMPLATE=$(jq -r '.ovmf_vars_template // empty' "$DEFAULTS_JSON" 2>/dev/null || true)
-if [ -z "$OVMF_VARS_TEMPLATE" ] || [ ! -f "$OVMF_VARS_TEMPLATE" ]; then
-  for candidate in \
-      /usr/share/OVMF/OVMF_VARS_4M.fd \
-      /usr/share/OVMF/OVMF_VARS.fd \
-      /usr/share/ovmf/OVMF_VARS.fd \
-      /usr/share/edk2/ovmf/OVMF_VARS.fd; do
-    if [ -f "$candidate" ]; then
-      OVMF_VARS_TEMPLATE="$candidate"
-      break
-    fi
-  done
 fi
-
-mkdir -p "${ROOT}/run" "${ROOT}/logs"
-OVMF_VARS="${ROOT}/run/${PROFILE_NAME}-vars.fd"
-if [ -n "${OVMF_VARS_TEMPLATE:-}" ] && [ -f "$OVMF_VARS_TEMPLATE" ] && [ ! -f "$OVMF_VARS" ]; then
-  VARS_SIZE=$(stat -c%s "$OVMF_VARS_TEMPLATE")
-  dd if=/dev/zero of="$OVMF_VARS" bs="$VARS_SIZE" count=1 2>/dev/null
-fi
-NVRAM_LINE=""
-[ -f "$OVMF_VARS" ] && NVRAM_LINE="    <nvram>${OVMF_VARS}</nvram>"
+ISO_PARAMS=$(cat "$CMDLINE_FILE")
+APPEND="root=/dev/ram0 ${ISO_PARAMS} SRC= DATA=/dev/sda2 console=ttyS0,115200n8 androidboot.enable_console=1 quiet"
 
 # ── Image paths ───────────────────────────────────────────────────────────────
 IMG="${ROOT}/builds/android11-${PROFILE_NAME}-latest.qcow2"
-UDATA="${ROOT}/userdata/userdata-${PROFILE_NAME}.qcow2"
-
 [ -f "$IMG" ] || {
   echo "[gen-libvirt-xml] ERROR: Image not found: $IMG" >&2
   echo "[gen-libvirt-xml] Build it first: bash scripts/set-profile.sh ${PROFILE_NAME}" >&2
   exit 1
 }
 
-if [ ! -f "$UDATA" ]; then
-  echo "[gen-libvirt-xml] Userdata volume not found — creating ${USERDATA_SIZE} volume..."
-  mkdir -p "${ROOT}/userdata"
-  qemu-img create -f qcow2 "$UDATA" "$USERDATA_SIZE"
-fi
-
+mkdir -p "${ROOT}/run" "${ROOT}/logs"
 SERIAL_LOG="${ROOT}/logs/${PROFILE_NAME}-serial.log"
 
 # ── Derived values ────────────────────────────────────────────────────────────
@@ -202,8 +163,9 @@ cat > "$OUTPUT_PATH" <<XMLEOF
   <vcpu placement='static'>${VCPUS}</vcpu>
   <os>
     <type arch='x86_64' machine='pc-q35-10.0'>hvm</type>
-    <loader readonly='yes' type='pflash'>${OVMF_PATH}</loader>
-${NVRAM_LINE}
+    <kernel>${KERNEL}</kernel>
+    <initrd>${INITRD}</initrd>
+    <cmdline>${APPEND}</cmdline>
   </os>
   <features>
     <acpi/>
@@ -216,16 +178,13 @@ ${NVRAM_LINE}
 ${HUGEPAGES_BLOCK}
   <devices>
     <emulator>${QEMU_BIN}</emulator>
+    <controller type='scsi' index='0' model='virtio-scsi'/>
     <disk type='file' device='disk'>
       <driver name='qemu' type='qcow2' cache='none'/>
       <source file='${IMG}'/>
-      <target dev='vda' bus='virtio'/>
+      <target dev='sda' bus='scsi'/>
+      <address type='drive' controller='0' bus='0' target='0' unit='0'/>
       <boot order='1'/>
-    </disk>
-    <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2' cache='none'/>
-      <source file='${UDATA}'/>
-      <target dev='vdb' bus='virtio'/>
     </disk>
     <controller type='usb' index='0' model='ich9-ehci1'/>
     <controller type='usb' index='0' model='ich9-uhci1'><master startport='0'/></controller>

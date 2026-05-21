@@ -139,7 +139,6 @@ cleanup_work() {
   sudo umount "${WORK}/mnt/vendor" 2>/dev/null || true
   sudo umount "${WORK}/mnt/product" 2>/dev/null || true
   sudo umount "${WORK}/mnt/system" 2>/dev/null || true
-  sudo umount "${WORK}/mnt/efi"    2>/dev/null || true
   sudo umount "${WORK}/mnt/android" 2>/dev/null || true
   [ -n "${LOOP_DEV:-}" ] && sudo losetup -d "$LOOP_DEV" 2>/dev/null || true
   rm -rf "${WORK}/sfs-*" "${WORK}/"*.raw "${WORK}/disk.raw" "${WORK}/boot-*" 2>/dev/null || true
@@ -319,105 +318,42 @@ log "Unmounting partition images..."
 sudo umount "${WORK}/mnt/product" 2>/dev/null || true
 sudo umount "${WORK}/mnt/system"  2>/dev/null || true
 
-# ── Assemble bootable disk (GPT: EFI vfat p1 + ext4 Android data p2 + ext4 Userdata p3) ──
+# ── Assemble bootable disk (GPT: ext4 Android data p1 + ext4 Userdata p2) ──
 log "Assembling bootable disk image..."
 SYSTEM_SZ=$( stat -c%s "${WORK}/system.raw")
 VENDOR_SZ=$([ -f "${WORK}/vendor.raw"  ] && stat -c%s "${WORK}/vendor.raw"  || echo 0)
 PRODUCT_SZ=$([ -f "${WORK}/product.raw"] && stat -c%s "${WORK}/product.raw" || echo 0)
-BOOT_SZ=$(find "${WORK}" -maxdepth 1 -name 'boot-*' -exec du -sb {} + 2>/dev/null \
-          | awk '{s+=$1}END{print s+0}')
-DATA_CONTENT=$(( SYSTEM_SZ + VENDOR_SZ + PRODUCT_SZ + BOOT_SZ ))
+DATA_CONTENT=$(( SYSTEM_SZ + VENDOR_SZ + PRODUCT_SZ ))
 DATA_SZ=$(( DATA_CONTENT * 12 / 10 + 256 * 1024 * 1024 ))
-USERDATA_SZ=$(( 8 * 1024 * 1024 * 1024 ))   # 8 GiB userdata partition (sda3)
-DISK_SZ=$(( DATA_SZ + 256 * 1024 * 1024 + 4 * 1024 * 1024 + USERDATA_SZ ))
+USERDATA_SZ=$(( 8 * 1024 * 1024 * 1024 ))   # 8 GiB userdata partition (sda2)
+DISK_SZ=$(( DATA_SZ + 4 * 1024 * 1024 + USERDATA_SZ ))
 log "Disk size: $(( DISK_SZ / 1024 / 1024 )) MB  (data $(( DATA_SZ / 1024 / 1024 )) MB + 8192 MB userdata)"
 
-# Compute where the data partition ends (MiB, rounded up) for the third partition boundary
-DATA_END_MIB=$(( 257 + (DATA_SZ + 1048575) / 1048576 ))
+# Compute where the data partition ends (MiB, rounded up) for the second partition boundary
+DATA_END_MIB=$(( 1 + (DATA_SZ + 1048575) / 1048576 ))
 
 truncate -s $DISK_SZ "${WORK}/disk.raw"
 sudo parted -s "${WORK}/disk.raw" \
   mklabel gpt \
-  mkpart EFI      fat32 1MiB               257MiB \
-  set 1 esp on \
-  mkpart Data     ext4  257MiB             ${DATA_END_MIB}MiB \
+  mkpart Data     ext4  1MiB               ${DATA_END_MIB}MiB \
   mkpart Userdata ext4  ${DATA_END_MIB}MiB 100%
 
 LOOP_DEV=$(sudo losetup --find --show --partscan "${WORK}/disk.raw")
 log "Loop device: ${LOOP_DEV}"
 sleep 1
 
-sudo mkfs.vfat -n EFI        "${LOOP_DEV}p1"
-sudo mkfs.ext4 -L BlissOS    "${LOOP_DEV}p2"
-sudo mkfs.ext4 -L Userdata   "${LOOP_DEV}p3"
+sudo mkfs.ext4 -L BlissOS    "${LOOP_DEV}p1"
+sudo mkfs.ext4 -L Userdata   "${LOOP_DEV}p2"
 
-mkdir -p "${WORK}/mnt/efi" "${WORK}/mnt/android"
-sudo mount "${LOOP_DEV}p1" "${WORK}/mnt/efi"
-sudo mount "${LOOP_DEV}p2" "${WORK}/mnt/android"
+mkdir -p "${WORK}/mnt/android"
+sudo mount "${LOOP_DEV}p1" "${WORK}/mnt/android"
 
 sudo cp "${WORK}/system.raw" "${WORK}/mnt/android/system.img"
 [ -f "${WORK}/vendor.raw"  ] && sudo cp "${WORK}/vendor.raw"  "${WORK}/mnt/android/vendor.img"  || true
 [ -f "${WORK}/product.raw" ] && sudo cp "${WORK}/product.raw" "${WORK}/mnt/android/product.img" || true
 
-# Kernel + initrd go on the EFI partition (FAT32, always readable by GRUB) AND on the
-# android ext4 partition.  Android-x86-derived GRUB binaries typically search for the
-# partition containing system.img, root to it, and load kernel/initrd relative to that
-# root — so they must be present on both partitions to work regardless of prefix.
-[ -f "${WORK}/boot-kernel"      ] && sudo cp "${WORK}/boot-kernel"      "${WORK}/mnt/efi/kernel"         || true
-[ -f "${WORK}/boot-ramdisk.img" ] && sudo cp "${WORK}/boot-ramdisk.img" "${WORK}/mnt/efi/initrd.img"     || true
-[ -f "${WORK}/boot-initrd.img"  ] && sudo cp "${WORK}/boot-initrd.img"  "${WORK}/mnt/efi/initrd.img"     || true
-[ -f "${WORK}/boot-kernel"      ] && sudo cp "${WORK}/boot-kernel"      "${WORK}/mnt/android/kernel"     || true
-[ -f "${WORK}/boot-ramdisk.img" ] && sudo cp "${WORK}/boot-ramdisk.img" "${WORK}/mnt/android/initrd.img" || true
-[ -f "${WORK}/boot-initrd.img"  ] && sudo cp "${WORK}/boot-initrd.img"  "${WORK}/mnt/android/initrd.img" || true
-
-# Install GRUB EFI extracted from the ISO.
-# ISOs ship BOOTx64.EFI (shim) + grubx64.efi (the real GRUB binary).
-# We don't need Secure Boot, so install grubx64.efi directly as BOOTx64.EFI —
-# OVMF runs it straight and there is no shim chain-load to fail.
-GRUB_EFI=$(find "${WORK}/boot-efi/" -iname 'grubx64.efi' 2>/dev/null | head -1 || true)
-[ -f "$GRUB_EFI" ] || GRUB_EFI=$(find "${WORK}/boot-efi/" -iname 'bootx64.efi' 2>/dev/null | head -1 || true)
-[ -f "$GRUB_EFI" ] || die "GRUB EFI binary not found in ISO (expected boot-efi/BOOT/grubx64.efi)"
-
-sudo mkdir -p "${WORK}/mnt/efi/EFI/BOOT" "${WORK}/mnt/android/boot/grub"
-sudo cp "$GRUB_EFI" "${WORK}/mnt/efi/EFI/BOOT/BOOTx64.EFI"
-log "GRUB EFI: $(basename "$GRUB_EFI") → EFI/BOOT/BOOTx64.EFI"
-
-# Copy grub.cfg from the ISO to both partitions, preserving the distro's original
-# menu entries, HWC/GRALLOC, quiet, timeouts, and any debug entries.
-# set-profile.sh will only patch DATA= and add console=ttyS0 on top.
-#
-# Priority: UEFI copy (clean /kernel paths) > BIOS copy (may have (loop)/ prefixes).
-ISO_GRUB_CFG=""
-[ -f "${WORK}/boot-efi/EFI/BOOT/grub.cfg" ] && ISO_GRUB_CFG="${WORK}/boot-efi/EFI/BOOT/grub.cfg"
-[ -z "$ISO_GRUB_CFG" ] && [ -f "${WORK}/boot-grub/grub.cfg" ] && ISO_GRUB_CFG="${WORK}/boot-grub/grub.cfg"
-
-if [ -n "$ISO_GRUB_CFG" ]; then
-  log "Using ISO grub.cfg: ${ISO_GRUB_CFG}"
-  # Normalize any ISO-device path prefixes on linux/initrd lines so they work on a
-  # flat FAT32/ext4 disk — e.g. "(loop)/kernel" or "(hd0,gpt1)/kernel" → "/kernel".
-  sudo sed -E \
-    -e 's|^(\s*linux\s+)\([^)]+\)/|\1/|' \
-    -e 's|^(\s*initrd\s+)\([^)]+\)/|\1/|' \
-    "$ISO_GRUB_CFG" \
-    | sudo tee "${WORK}/mnt/efi/EFI/BOOT/grub.cfg" \
-               "${WORK}/mnt/android/boot/grub/grub.cfg" > /dev/null
-else
-  log "ISO grub.cfg not found — writing minimal fallback config"
-  DISTRO_DISPLAY_NAME=$(jq -r '.name' "$DISTRO_FILE")
-  sudo tee "${WORK}/mnt/efi/EFI/BOOT/grub.cfg" \
-           "${WORK}/mnt/android/boot/grub/grub.cfg" > /dev/null <<GRUBCFG
-set default=0
-set timeout=3
-
-menuentry "${DISTRO_DISPLAY_NAME}" {
-    linux /kernel root=/dev/ram0 androidboot.hardware=android_x86_64 androidboot.selinux=permissive SRC= DATA=
-    initrd /initrd.img
-}
-GRUBCFG
-fi
-
-sudo umount "${WORK}/mnt/efi"    "${WORK}/mnt/android"
-sudo rmdir  "${WORK}/mnt/efi"    "${WORK}/mnt/android"
+sudo umount "${WORK}/mnt/android"
+sudo rmdir  "${WORK}/mnt/android"
 sudo losetup -d "$LOOP_DEV"
 LOOP_DEV=""
 
@@ -431,6 +367,55 @@ qemu-img info "$OUT_IMG"
 log "Recording checksum..."
 sha256sum "$OUT_IMG" >> "${ROOT}/checksums.sha256"
 
+# ── Extract boot sidecars (kernel, initrd, cmdline) ──────────────────────────
+BASE_NAME="${BASE_IMAGE%.qcow2}"
+SIDECAR_KERNEL="${ROOT}/intermediate/${BASE_NAME}-kernel"
+SIDECAR_INITRD="${ROOT}/intermediate/${BASE_NAME}-initrd.img"
+SIDECAR_CMDLINE="${ROOT}/intermediate/${BASE_NAME}-cmdline"
+
+if [ -f "${WORK}/boot-kernel" ]; then
+  cp "${WORK}/boot-kernel" "$SIDECAR_KERNEL"
+  log "Kernel sidecar: ${SIDECAR_KERNEL} ($(du -sh "$SIDECAR_KERNEL" | cut -f1))"
+else
+  die "No kernel found in ISO — cannot create sidecar (expected 'kernel' at ISO root)"
+fi
+
+if [ -f "${WORK}/boot-initrd.img" ]; then
+  cp "${WORK}/boot-initrd.img" "$SIDECAR_INITRD"
+elif [ -f "${WORK}/boot-ramdisk.img" ]; then
+  cp "${WORK}/boot-ramdisk.img" "$SIDECAR_INITRD"
+else
+  die "No initrd found in ISO — cannot create sidecar (expected initrd.img or ramdisk.img)"
+fi
+log "Initrd sidecar: ${SIDECAR_INITRD} ($(du -sh "$SIDECAR_INITRD" | cut -f1))"
+
+ISO_ANDROID_CFG="${WORK}/boot-efi/EFI/BOOT/android.cfg"
+_ISO_GRUB_CFG=""
+[ -f "${WORK}/boot-efi/EFI/BOOT/grub.cfg" ] && _ISO_GRUB_CFG="${WORK}/boot-efi/EFI/BOOT/grub.cfg"
+[ -z "$_ISO_GRUB_CFG" ] && [ -f "${WORK}/boot-grub/grub.cfg" ] && _ISO_GRUB_CFG="${WORK}/boot-grub/grub.cfg"
+
+_linux_line=""
+for _cfg in "$ISO_ANDROID_CFG" ${_ISO_GRUB_CFG:+"$_ISO_GRUB_CFG"}; do
+  [ -f "$_cfg" ] || continue
+  _line=$(grep -m1 -E '^\s*linux\s' "$_cfg" 2>/dev/null || true)
+  if [ -n "$_line" ]; then _linux_line="$_line"; break; fi
+done
+
+if [ -n "$_linux_line" ]; then
+  echo "$_linux_line" \
+    | sed -E 's/^\s*linux\s+\S+\s*//' \
+    | tr ' ' '\n' \
+    | grep -vE '^(root=|SRC=|DATA=|BOOT_IMAGE=|console=|quiet$|nomodeset$)$' \
+    | grep -v '^$' \
+    | tr '\n' ' ' \
+    | sed 's/[[:space:]]*$//' \
+    > "$SIDECAR_CMDLINE"
+  log "Cmdline sidecar: $(cat "$SIDECAR_CMDLINE")"
+else
+  warn "No 'linux' line found in ISO config — using default cmdline"
+  echo "androidboot.hardware=android_x86_64 androidboot.selinux=permissive" > "$SIDECAR_CMDLINE"
+fi
+
 # ── Tidy work directory ───────────────────────────────────────────────────────
 log "Removing work files..."
 rm -rf "${WORK}/disk.raw" "${WORK}/"*.raw "${WORK}/boot-"* 2>/dev/null || true
@@ -440,5 +425,9 @@ trap - EXIT
 log ""
 log "Intermediate image ready: ${OUT_IMG}"
 log "$(qemu-img info "$OUT_IMG" | grep -E 'virtual size|disk size')"
+log "Boot sidecars:"
+log "  ${SIDECAR_KERNEL}"
+log "  ${SIDECAR_INITRD}"
+log "  ${SIDECAR_CMDLINE}"
 log ""
 log "Next step:  bash scripts/set-profile.sh <profile> --distro ${SLUG}"

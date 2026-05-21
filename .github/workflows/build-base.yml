@@ -210,7 +210,7 @@ jobs:
             qemu-system-x86 qemu-utils \
             android-tools-adb simg2img \
             e2fsprogs python3 python3-pip jq curl rsync \
-            ovmf p7zip-full lzip unzip squashfs-tools \
+            p7zip-full lzip unzip squashfs-tools \
             parted
           pip3 install jsonschema --quiet
 
@@ -451,71 +451,39 @@ jobs:
           sudo rmdir mnt/product mnt/system 2>/dev/null || true
 
       # ── Assemble bootable disk image ─────────────────────────────────────────
-      # GPT: p1=EFI vfat (GRUB + kernel + initrd), p2=ext4 Android data (system.img).
-      # SRC= and DATA= are left empty here; set-profile.sh patches
-      # them per-device when building a profile image.
+      # GPT: p1=ext4 Android data (system.img), p2=ext4 Userdata (8 GiB).
+      # Kernel/initrd/cmdline are extracted as sidecars in the next step.
       - name: Assemble bootable disk image
         if: steps.plan.outputs.build == 'true'
         run: |
           SYSTEM_SZ=$(stat -c%s work/system.raw)
           VENDOR_SZ=$([ -f work/vendor.raw  ] && stat -c%s work/vendor.raw  || echo 0)
           PRODUCT_SZ=$([ -f work/product.raw ] && stat -c%s work/product.raw || echo 0)
-          BOOT_SZ=$(find work/ -maxdepth 1 -name 'boot-*' -exec du -sb {} + 2>/dev/null \
-                    | awk '{s+=$1}END{print s+0}')
-          DATA_CONTENT=$(( SYSTEM_SZ + VENDOR_SZ + PRODUCT_SZ + BOOT_SZ ))
+          DATA_CONTENT=$(( SYSTEM_SZ + VENDOR_SZ + PRODUCT_SZ ))
           DATA_SZ=$(( DATA_CONTENT * 12 / 10 + 256 * 1024 * 1024 ))
-          DISK_SZ=$(( DATA_SZ + 256 * 1024 * 1024 + 4 * 1024 * 1024 ))
-          echo "Disk size: $(( DISK_SZ / 1024 / 1024 )) MB  (data $(( DATA_SZ / 1024 / 1024 )) MB)"
+          USERDATA_SZ=$(( 8 * 1024 * 1024 * 1024 ))
+          DISK_SZ=$(( DATA_SZ + 4 * 1024 * 1024 + USERDATA_SZ ))
+          DATA_END_MIB=$(( 1 + (DATA_SZ + 1048575) / 1048576 ))
+          echo "Disk size: $(( DISK_SZ / 1024 / 1024 )) MB  (data $(( DATA_SZ / 1024 / 1024 )) MB + 8192 MB userdata)"
           truncate -s $DISK_SZ work/disk.raw
           sudo parted -s work/disk.raw \
             mklabel gpt \
-            mkpart EFI  fat32 1MiB   257MiB \
-            set 1 esp on \
-            mkpart Data ext4  257MiB 100%
+            mkpart Data     ext4  1MiB               ${DATA_END_MIB}MiB \
+            mkpart Userdata ext4  ${DATA_END_MIB}MiB 100%
           LOOP=$(sudo losetup --find --show --partscan work/disk.raw)
           echo "Loop device: $LOOP"
           sleep 1
-          sudo mkfs.vfat -n EFI         "${LOOP}p1"
-          sudo mkfs.ext4 -L BlissOS    "${LOOP}p2"
-          sudo mkdir -p mnt/efi mnt/android
-          sudo mount "${LOOP}p1" mnt/efi
-          sudo mount "${LOOP}p2" mnt/android
+          sudo mkfs.ext4 -L BlissOS  "${LOOP}p1"
+          sudo mkfs.ext4 -L Userdata "${LOOP}p2"
+          sudo mkdir -p mnt/android
+          sudo mount "${LOOP}p1" mnt/android
 
-          # System / vendor / product images on data partition (p2)
           sudo cp work/system.raw  mnt/android/system.img
           [ -f work/vendor.raw  ] && sudo cp work/vendor.raw  mnt/android/vendor.img  || true
           [ -f work/product.raw ] && sudo cp work/product.raw mnt/android/product.img || true
 
-          # Kernel + initrd on EFI partition (p1) — GRUB reads FAT32 natively
-          [ -f work/boot-kernel      ] && sudo cp work/boot-kernel      mnt/efi/kernel     || true
-          [ -f work/boot-ramdisk.img ] && sudo cp work/boot-ramdisk.img mnt/efi/initrd.img || true
-          [ -f work/boot-initrd.img  ] && sudo cp work/boot-initrd.img  mnt/efi/initrd.img || true
-
-          # Install GRUB EFI extracted from the ISO.
-          # ISOs ship BOOTx64.EFI (shim) + grubx64.efi (the real GRUB binary).
-          # We don't need Secure Boot, so install grubx64.efi directly as BOOTx64.EFI —
-          # OVMF runs it straight and there is no shim chain-load to fail.
-          GRUB_EFI=$(find work/boot-efi/ -iname 'grubx64.efi' 2>/dev/null | head -1)
-          [ -f "$GRUB_EFI" ] || GRUB_EFI=$(find work/boot-efi/ -iname 'bootx64.efi' 2>/dev/null | head -1)
-          [ -f "$GRUB_EFI" ] || { echo "::error::GRUB EFI binary not found in ISO"; exit 1; }
-          echo "GRUB EFI: $(basename "$GRUB_EFI") → EFI/BOOT/BOOTx64.EFI"
-          sudo mkdir -p mnt/efi/EFI/BOOT
-          sudo cp "$GRUB_EFI" mnt/efi/EFI/BOOT/BOOTx64.EFI
-
-          # Write GRUB config — DATA= and HWC= left empty; set-profile.sh patches per-device
-          DISTRO_NAME=$(jq -r '.name' androiddistro/${{ matrix.distro }}.json)
-          sudo tee mnt/efi/EFI/BOOT/grub.cfg > /dev/null << GRUBCFG
-          set default=0
-          set timeout=3
-
-          menuentry "${DISTRO_NAME}" {
-              linux /kernel root=/dev/ram0 androidboot.hardware=android_x86_64 androidboot.selinux=permissive SRC= DATA=
-              initrd /initrd.img
-          }
-          GRUBCFG
-
-          sudo umount mnt/efi mnt/android
-          sudo rmdir  mnt/efi mnt/android
+          sudo umount mnt/android
+          sudo rmdir  mnt/android
           sudo losetup -d "$LOOP"
 
       - name: Convert disk image to qcow2
@@ -526,6 +494,65 @@ jobs:
             work/disk.raw \
             "image-cache/${{ matrix.base_image }}"
           qemu-img info "image-cache/${{ matrix.base_image }}"
+
+      - name: Extract boot sidecars
+        if: steps.plan.outputs.build == 'true'
+        run: |
+          BASE_IMAGE="${{ matrix.base_image }}"
+          BASE_NAME="${BASE_IMAGE%.qcow2}"
+
+          if [ -f work/boot-kernel ]; then
+            cp work/boot-kernel "image-cache/${BASE_NAME}-kernel"
+          else
+            echo "::error::No kernel found in ISO work directory"
+            exit 1
+          fi
+
+          if [ -f work/boot-initrd.img ]; then
+            cp work/boot-initrd.img "image-cache/${BASE_NAME}-initrd.img"
+          elif [ -f work/boot-ramdisk.img ]; then
+            cp work/boot-ramdisk.img "image-cache/${BASE_NAME}-initrd.img"
+          else
+            echo "::error::No initrd found in ISO work directory"
+            exit 1
+          fi
+
+          ISO_ANDROID_CFG="work/boot-efi/EFI/BOOT/android.cfg"
+          _ISO_GRUB_CFG=""
+          [ -f "work/boot-efi/EFI/BOOT/grub.cfg" ] && _ISO_GRUB_CFG="work/boot-efi/EFI/BOOT/grub.cfg"
+          [ -z "$_ISO_GRUB_CFG" ] && [ -f "work/boot-grub/grub.cfg" ] && _ISO_GRUB_CFG="work/boot-grub/grub.cfg"
+
+          _linux_line=""
+          for _cfg in "$ISO_ANDROID_CFG" ${_ISO_GRUB_CFG:+"$_ISO_GRUB_CFG"}; do
+            [ -f "$_cfg" ] || continue
+            _line=$(grep -m1 -E '^\s*linux\s' "$_cfg" 2>/dev/null || true)
+            if [ -n "$_line" ]; then _linux_line="$_line"; break; fi
+          done
+
+          if [ -n "$_linux_line" ]; then
+            echo "$_linux_line" \
+              | sed -E 's/^\s*linux\s+\S+\s*//' \
+              | tr ' ' '\n' \
+              | grep -vE '^(root=|SRC=|DATA=|BOOT_IMAGE=|console=|quiet$|nomodeset$)$' \
+              | grep -v '^$' \
+              | tr '\n' ' ' \
+              | sed 's/[[:space:]]*$//' \
+              > "image-cache/${BASE_NAME}-cmdline"
+            echo "Cmdline: $(cat "image-cache/${BASE_NAME}-cmdline")"
+          else
+            echo "::warning::No linux line found in ISO config — using default cmdline"
+            echo "androidboot.hardware=android_x86_64 androidboot.selinux=permissive" \
+              > "image-cache/${BASE_NAME}-cmdline"
+          fi
+
+          echo "=== Boot sidecars ==="
+          ls -lh "image-cache/${BASE_NAME}-"*
+
+      - name: Derive base name
+        id: base
+        run: |
+          img="${{ matrix.base_image }}"
+          echo "name=${img%.qcow2}" >> "$GITHUB_OUTPUT"
 
       - name: Record checksum
         if: steps.plan.outputs.build == 'true'
@@ -557,6 +584,9 @@ jobs:
           path: |
             image-cache/${{ matrix.base_image }}
             image-cache/${{ matrix.base_image }}.sha256
+            image-cache/${{ steps.base.outputs.name }}-kernel
+            image-cache/${{ steps.base.outputs.name }}-initrd.img
+            image-cache/${{ steps.base.outputs.name }}-cmdline
           if-no-files-found: error
           retention-days: 1
 
@@ -612,7 +642,11 @@ jobs:
             ```
             cat ${{ matrix.base_image }}.part-* > ${{ matrix.base_image }}
             ```
-          files: image-cache/${{ matrix.base_image }}*
+          files: |
+            image-cache/${{ matrix.base_image }}*
+            image-cache/${{ steps.base.outputs.name }}-kernel
+            image-cache/${{ steps.base.outputs.name }}-initrd.img
+            image-cache/${{ steps.base.outputs.name }}-cmdline
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -665,10 +699,10 @@ jobs:
           lsblk /dev/nbd0
 
           sudo mkdir -p mnt/android mnt/system
-          sudo mount /dev/nbd0p2 mnt/android
+          sudo mount /dev/nbd0p1 mnt/android
           [ -f mnt/android/system.img ] \
             && sudo mount -o loop,ro mnt/android/system.img mnt/system \
-            || { echo "::error::system.img not found on data partition"; exit 1; }
+            || { echo "::error::system.img not found on data partition (p1)"; exit 1; }
 
           if [ -f "mnt/system/build.prop" ] || [ -d "mnt/system/app" ] || [ -d "mnt/system/lib" ]; then
             SYS="mnt/system"
@@ -736,28 +770,20 @@ jobs:
             echo "=== ARM translation: disabled for ${{ matrix.distro }} — skipping checks ==="
           fi
 
-          echo "=== GRUB bootloader ==="
-          sudo mkdir -p mnt/efi
-          sudo mount /dev/nbd0p1 mnt/efi
-          if sudo test -f mnt/efi/EFI/BOOT/BOOTx64.EFI; then
-            echo "  ✓ mnt/efi/EFI/BOOT/BOOTx64.EFI (GRUB binary)"
-          else
-            echo "  ✗ MISSING: mnt/efi/EFI/BOOT/BOOTx64.EFI"
-            FAIL=$((FAIL+1))
-          fi
-          if sudo test -f mnt/efi/EFI/BOOT/grub.cfg; then
-            echo "  ✓ mnt/efi/EFI/BOOT/grub.cfg"
-          else
-            echo "  ✗ MISSING: mnt/efi/EFI/BOOT/grub.cfg"
-            FAIL=$((FAIL+1))
-          fi
-          if sudo test -f mnt/efi/kernel; then
-            echo "  ✓ mnt/efi/kernel"
-          else
-            echo "  ⚠ mnt/efi/kernel absent — expected on EFI partition"
-          fi
-          sudo umount mnt/efi 2>/dev/null || true
-          sudo rmdir mnt/efi 2>/dev/null || true
+          echo "=== Boot sidecars ==="
+          BASE_IMAGE="${{ matrix.base_image }}"
+          BASE_NAME="${BASE_IMAGE%.qcow2}"
+          for sidecar in "image-cache/${BASE_NAME}-kernel" \
+                         "image-cache/${BASE_NAME}-initrd.img" \
+                         "image-cache/${BASE_NAME}-cmdline"; do
+            if [ -f "$sidecar" ]; then
+              echo "  ✓ $(basename "$sidecar")"
+            else
+              echo "  ✗ MISSING: $(basename "$sidecar")"
+              FAIL=$((FAIL+1))
+            fi
+          done
+          echo "  cmdline: $(cat "image-cache/${BASE_NAME}-cmdline" 2>/dev/null || echo '(missing)')"
 
           $HAS_VENDOR_IMG && sudo umount mnt/vendor 2>/dev/null || true
           sudo umount mnt/system mnt/android 2>/dev/null || true
@@ -789,10 +815,10 @@ jobs:
           [ -e /dev/kvm ] || { echo "::error::/dev/kvm not found on this runner"; exit 1; }
           echo "KVM confirmed: $(ls -la /dev/kvm)"
 
-      - name: Install ADB and OVMF
+      - name: Install ADB
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends android-tools-adb qemu-utils ovmf
+          sudo apt-get install -y --no-install-recommends android-tools-adb qemu-utils
 
       - name: Get bliss14 cache key from matrix
         id: bliss14
@@ -813,32 +839,24 @@ jobs:
 
       - name: Boot VM headlessly
         run: |
-          # Locate OVMF firmware (path varies by Ubuntu version)
-          OVMF_CODE=""
-          for f in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd \
-                   /usr/share/ovmf/OVMF.fd /usr/share/qemu/OVMF.fd; do
-            [ -f "$f" ] && OVMF_CODE="$f" && break
-          done
-          [ -n "$OVMF_CODE" ] || { echo "::error::OVMF firmware not found"; exit 1; }
-          OVMF_VARS=""
-          for f in /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd \
-                   /usr/share/ovmf/OVMF_VARS.fd; do
-            [ -f "$f" ] && OVMF_VARS="$f" && break
-          done
-          # Always use a zeroed VARS file so OVMF starts clean (no stale BdsDxe entries)
-          VARS_COPY=/tmp/ovmf-vars.fd
-          if [ -n "$OVMF_VARS" ]; then
-            dd if=/dev/zero of="$VARS_COPY" bs=$(stat -c%s "$OVMF_VARS") count=1 2>/dev/null
-          else
-            dd if=/dev/zero of="$VARS_COPY" bs=540672 count=1 2>/dev/null
-          fi
+          BASE_IMAGE="${{ steps.bliss14.outputs.base_image }}"
+          BASE_NAME="${BASE_IMAGE%.qcow2}"
+          KERNEL="image-cache/${BASE_NAME}-kernel"
+          INITRD="image-cache/${BASE_NAME}-initrd.img"
+          CMDLINE_FILE="image-cache/${BASE_NAME}-cmdline"
+          [ -f "$KERNEL" ]       || { echo "::error::Kernel sidecar not found: $KERNEL"; exit 1; }
+          [ -f "$INITRD" ]       || { echo "::error::Initrd sidecar not found: $INITRD"; exit 1; }
+          [ -f "$CMDLINE_FILE" ] || { echo "::error::Cmdline sidecar not found: $CMDLINE_FILE"; exit 1; }
+          ISO_PARAMS=$(cat "$CMDLINE_FILE")
+          APPEND="root=/dev/ram0 ${ISO_PARAMS} SRC= DATA=/dev/sda2 console=ttyS0,115200n8 androidboot.enable_console=1 quiet"
           qemu-system-x86_64 \
             -enable-kvm \
             -smp 2 -m 2048 \
             -cpu host \
             -machine pc-q35-10.0,vmport=off \
-            -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
-            -drive "if=pflash,format=raw,file=${VARS_COPY}" \
+            -kernel "$KERNEL" \
+            -initrd "$INITRD" \
+            -append "$APPEND" \
             -device virtio-scsi-pci,id=scsi0 \
             -drive "file=image-cache/${{ steps.bliss14.outputs.base_image }},if=none,id=hd0" \
             -device "scsi-hd,drive=hd0,bus=scsi0.0" \

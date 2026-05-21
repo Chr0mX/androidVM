@@ -191,9 +191,8 @@ install_apt() {
     android-tools-adb \
     e2fsprogs python3 python3-pip \
     jq curl rsync git wget \
-    ovmf p7zip-full ca-certificates \
-    bridge-utils lzip squashfs-tools parted unzip tar \
-    grub-efi-amd64-bin
+    p7zip-full ca-certificates \
+    bridge-utils lzip squashfs-tools parted unzip tar
   # simg2img/img2simg: standalone on Ubuntu ≤22.04, part of libsparse on Debian 12+ / Ubuntu 24.04+
   if apt-cache show android-sdk-libsparse-utils &>/dev/null 2>&1; then
     sudo apt-get install -y --no-install-recommends android-sdk-libsparse-utils
@@ -211,7 +210,7 @@ install_dnf() {
     android-tools \
     e2fsprogs python3 python3-pip \
     jq curl rsync git wget \
-    edk2-ovmf p7zip \
+    p7zip \
     bridge-utils lzip squashfs-tools parted unzip tar
   pip3 install jsonschema --quiet
 }
@@ -222,7 +221,7 @@ install_pacman() {
     android-tools \
     e2fsprogs python python-pip \
     jq curl rsync git \
-    edk2-ovmf p7zip
+    p7zip
   pip3 install jsonschema --quiet
 }
 
