@@ -259,7 +259,7 @@ else
     # ── GRUB image(s) ─────────────────────────────────────────────────────────
     # HWC, GRALLOC, quiet, and other distro params come from the ISO's grub.cfg.
     # We only set DATA= (userdata disk) and add console= (headless QEMU serial).
-    log "Patching ${#GRUB_CFGS[@]} GRUB config(s): DATA=/dev/vdb + console=ttyS0 ..."
+    log "Patching ${#GRUB_CFGS[@]} GRUB config(s): DATA=/dev/sda3 + console=ttyS0 ..."
     for GRUB_CFG in "${GRUB_CFGS[@]}"; do
       # Replace DATA= regardless of whether it is empty or already set to something
       sudo sed -i 's|DATA=[^ ]*|DATA=/dev/sda3|g' "$GRUB_CFG"
@@ -290,7 +290,7 @@ else
 
   elif [ -f "$REFIND_CFG" ]; then
     # ── rEFInd image (backward compatibility for pre-GRUB builds) ─────────
-    log "Patching rEFInd config: DATA=/dev/vdb + console=ttyS0 ..."
+    log "Patching rEFInd config: DATA=/dev/sda3 + console=ttyS0 ..."
     log "NOTE: this image uses rEFInd — rebuild from fetch-distro.sh to switch to GRUB"
     sudo sed -i 's|DATA=[^ "]*|DATA=/dev/sda3|g' "$REFIND_CFG"
     for param in "${EXTRA_BOOT_PARAMS[@]}"; do
