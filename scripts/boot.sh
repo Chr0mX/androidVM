@@ -249,7 +249,6 @@ fi
 echo "[boot] Starting VM: profile=${PROFILE_NAME}  vm-profile=${VM_PROFILE_NAME}"
 echo "[boot] Resources:   ${CPU_CORES}c/${CPU_THREADS}t  ${RAM_MB}MB RAM"
 echo "[boot] Image:       ${IMG}"
-echo "[boot] Userdata:    ${UDATA}"
 echo "[boot] ADB:         adb connect localhost:${ADB_PORT}"
 $SPICE_MODE && echo "[boot] SPICE:        spice://localhost:5900"
 
