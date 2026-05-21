@@ -91,47 +91,8 @@ fi
 
 # ── Image paths ────────────────────────────────────────────────────────────────
 IMG="${ROOT}/builds/android11-${PROFILE_NAME}-latest.qcow2"
-UDATA="${ROOT}/userdata/userdata-${PROFILE_NAME}.qcow2"
 
 [ -f "$IMG" ] || { echo "[boot] ERROR: Image not found: $IMG" >&2; exit 1; }
-[ -f "$UDATA" ] || {
-  echo "[boot] Userdata volume not found — creating fresh $(jq -r '.userdata_size // "8G"' "$DEFAULTS_JSON" 2>/dev/null || echo "8G") volume..."
-  UDATA_SIZE=$(jq -r '.userdata_size // "8G"' "$DEFAULTS_JSON" 2>/dev/null || echo "8G")
-  qemu-img create -f qcow2 "$UDATA" "$UDATA_SIZE"
-
-  # Pre-format userdata so Android init sees a valid filesystem on first boot.
-  # Distro preference is read from the .distro sidecar written by set-profile.sh.
-  DISTRO_SIDECAR="${ROOT}/builds/android11-${PROFILE_NAME}.distro"
-  UDATA_FS="ext4"
-  if [ -f "$DISTRO_SIDECAR" ]; then
-    _DISTRO=$(cat "$DISTRO_SIDECAR")
-    _DISTRO_FILE="${ROOT}/androiddistro/${_DISTRO}.json"
-    if [ -f "$_DISTRO_FILE" ]; then
-      UDATA_FS=$(jq -r '.userdata_fs // "ext4"' "$_DISTRO_FILE" 2>/dev/null || echo "ext4")
-    fi
-  fi
-
-  if command -v qemu-nbd &>/dev/null; then
-    echo "[boot] Pre-formatting userdata as ${UDATA_FS}..."
-    UDATA_NBD="/dev/nbd1"
-    sudo qemu-nbd -c "$UDATA_NBD" "$UDATA"
-    sleep 1
-    case "$UDATA_FS" in
-      f2fs)
-        if command -v mkfs.f2fs &>/dev/null; then
-          sudo mkfs.f2fs -f "$UDATA_NBD"
-        else
-          echo "[boot] WARNING: mkfs.f2fs not found — pre-formatting as ext4 instead"
-          sudo mkfs.ext4 -F "$UDATA_NBD"
-        fi
-        ;;
-      *) sudo mkfs.ext4 -F "$UDATA_NBD" ;;
-    esac
-    sudo qemu-nbd -d "$UDATA_NBD"
-  else
-    echo "[boot] NOTE: qemu-nbd not available — skipping userdata pre-format (Android init will format on first boot)"
-  fi
-}
 
 # ── KVM flags ─────────────────────────────────────────────────────────────────
 KVM_FLAGS=()
@@ -298,8 +259,7 @@ qemu-system-x86_64 \
   -m "${RAM_MB}" \
   "${HUGEPAGES_FLAGS[@]}" \
   -machine pc-q35-10.0,vmport=off \
-  -drive "file=${IMG},if=virtio,index=0,${IMG_SNAPSHOT}" \
-  -drive "file=${UDATA},if=virtio,index=1,snapshot=off" \
+  -drive "file=${IMG},if=scsi,index=0,${IMG_SNAPSHOT}" \
   "${GPU_FLAGS[@]}" \
   "${DISPLAY_FLAGS[@]}" \
   "${AUDIO_FLAGS[@]}" \

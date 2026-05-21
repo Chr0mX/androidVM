@@ -811,9 +811,6 @@ jobs:
           path: image-cache/
           key: ${{ steps.bliss14.outputs.cache_key }}
 
-      - name: Create throw-away userdata volume
-        run: qemu-img create -f qcow2 userdata-test.qcow2 4G
-
       - name: Boot VM headlessly
         run: |
           # Locate OVMF firmware (path varies by Ubuntu version)
@@ -842,8 +839,7 @@ jobs:
             -machine pc-q35-10.0,vmport=off \
             -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
             -drive "if=pflash,format=raw,file=${VARS_COPY}" \
-            -drive "file=image-cache/${{ steps.bliss14.outputs.base_image }},if=virtio,index=0" \
-            -drive "file=userdata-test.qcow2,if=virtio,index=1" \
+            -drive "file=image-cache/${{ steps.bliss14.outputs.base_image }},if=scsi,index=0" \
             -device virtio-net-pci,netdev=net0 \
             -netdev user,id=net0,hostfwd=tcp::5555-:5555 \
             -device ich9-usb-ehci1 \

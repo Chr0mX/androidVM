@@ -319,7 +319,7 @@ log "Unmounting partition images..."
 sudo umount "${WORK}/mnt/product" 2>/dev/null || true
 sudo umount "${WORK}/mnt/system"  2>/dev/null || true
 
-# ── Assemble bootable disk (GPT: EFI vfat p1 + ext4 BlissOS data p2) ─────────
+# ── Assemble bootable disk (GPT: EFI vfat p1 + ext4 Android data p2 + ext4 Userdata p3) ──
 log "Assembling bootable disk image..."
 SYSTEM_SZ=$( stat -c%s "${WORK}/system.raw")
 VENDOR_SZ=$([ -f "${WORK}/vendor.raw"  ] && stat -c%s "${WORK}/vendor.raw"  || echo 0)
@@ -328,22 +328,28 @@ BOOT_SZ=$(find "${WORK}" -maxdepth 1 -name 'boot-*' -exec du -sb {} + 2>/dev/nul
           | awk '{s+=$1}END{print s+0}')
 DATA_CONTENT=$(( SYSTEM_SZ + VENDOR_SZ + PRODUCT_SZ + BOOT_SZ ))
 DATA_SZ=$(( DATA_CONTENT * 12 / 10 + 256 * 1024 * 1024 ))
-DISK_SZ=$(( DATA_SZ + 256 * 1024 * 1024 + 4 * 1024 * 1024 ))
-log "Disk size: $(( DISK_SZ / 1024 / 1024 )) MB  (data $(( DATA_SZ / 1024 / 1024 )) MB)"
+USERDATA_SZ=$(( 8 * 1024 * 1024 * 1024 ))   # 8 GiB userdata partition (sda3)
+DISK_SZ=$(( DATA_SZ + 256 * 1024 * 1024 + 4 * 1024 * 1024 + USERDATA_SZ ))
+log "Disk size: $(( DISK_SZ / 1024 / 1024 )) MB  (data $(( DATA_SZ / 1024 / 1024 )) MB + 8192 MB userdata)"
+
+# Compute where the data partition ends (MiB, rounded up) for the third partition boundary
+DATA_END_MIB=$(( 257 + (DATA_SZ + 1048575) / 1048576 ))
 
 truncate -s $DISK_SZ "${WORK}/disk.raw"
 sudo parted -s "${WORK}/disk.raw" \
   mklabel gpt \
-  mkpart EFI  fat32 1MiB   257MiB \
+  mkpart EFI      fat32 1MiB               257MiB \
   set 1 esp on \
-  mkpart Data ext4  257MiB 100%
+  mkpart Data     ext4  257MiB             ${DATA_END_MIB}MiB \
+  mkpart Userdata ext4  ${DATA_END_MIB}MiB 100%
 
 LOOP_DEV=$(sudo losetup --find --show --partscan "${WORK}/disk.raw")
 log "Loop device: ${LOOP_DEV}"
 sleep 1
 
 sudo mkfs.vfat -n EFI        "${LOOP_DEV}p1"
-sudo mkfs.ext4 -L BlissOS   "${LOOP_DEV}p2"
+sudo mkfs.ext4 -L BlissOS    "${LOOP_DEV}p2"
+sudo mkfs.ext4 -L Userdata   "${LOOP_DEV}p3"
 
 mkdir -p "${WORK}/mnt/efi" "${WORK}/mnt/android"
 sudo mount "${LOOP_DEV}p1" "${WORK}/mnt/efi"

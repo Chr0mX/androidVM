@@ -217,7 +217,6 @@ workspace/
 ├── base/                   # Master read-only image — never boot directly
 ├── intermediate/           # GApps + ARM trans baked in, still read-only
 ├── builds/                 # Final per-profile artifacts  ← boot these
-├── userdata/               # Per-profile userdata volumes (8 GB each)
 ├── run/                    # Runtime PID files
 ├── cache/                  # Download cache (ISOs, split archive parts — gitignored)
 ├── config/
@@ -254,7 +253,7 @@ workspace/
 
 ## Image Strategy
 
-Three-layer qcow2 backing chain — only the final layer stores diffs per profile:
+qcow2 backing chain — only the final layer stores diffs per profile:
 
 ```
 android11-base.qcow2           (raw source, never modified)
@@ -263,6 +262,14 @@ blissos14-gapps-arm.qcow2      (+ GApps + ARM trans, built once)
        ↓ backing-file
 android11-<profile>.qcow2      (+ identity props, one per profile)
 ```
+
+Each image is a single SCSI disk (`/dev/sda`) with three GPT partitions:
+
+| Partition | Label | FS | Contents |
+|---|---|---|---|
+| `/dev/sda1` | EFI | FAT32 | GRUB EFI binary, kernel, initrd |
+| `/dev/sda2` | BlissOS | ext4 | system.img, vendor.img, grub.cfg |
+| `/dev/sda3` | Userdata | ext4 | Android userdata (reset with `android-vm reset`) |
 
 ## Profile System
 

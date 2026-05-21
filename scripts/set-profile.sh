@@ -262,7 +262,7 @@ else
     log "Patching ${#GRUB_CFGS[@]} GRUB config(s): DATA=/dev/vdb + console=ttyS0 ..."
     for GRUB_CFG in "${GRUB_CFGS[@]}"; do
       # Replace DATA= regardless of whether it is empty or already set to something
-      sudo sed -i 's|DATA=[^ ]*|DATA=/dev/vdb|g' "$GRUB_CFG"
+      sudo sed -i 's|DATA=[^ ]*|DATA=/dev/sda3|g' "$GRUB_CFG"
       for param in "${EXTRA_BOOT_PARAMS[@]}"; do
         key="${param%%=*}"
         sudo sed -i "/linux \/kernel/{ /${key}/! s|$| ${param}|; }" "$GRUB_CFG"
@@ -292,7 +292,7 @@ else
     # ── rEFInd image (backward compatibility for pre-GRUB builds) ─────────
     log "Patching rEFInd config: DATA=/dev/vdb + console=ttyS0 ..."
     log "NOTE: this image uses rEFInd — rebuild from fetch-distro.sh to switch to GRUB"
-    sudo sed -i 's|DATA=[^ "]*|DATA=/dev/vdb|g' "$REFIND_CFG"
+    sudo sed -i 's|DATA=[^ "]*|DATA=/dev/sda3|g' "$REFIND_CFG"
     for param in "${EXTRA_BOOT_PARAMS[@]}"; do
       key="${param%%=*}"
       sudo sed -i "/^\s*options /{ /${key}/! s|\"$| ${param}\"|; }" "$REFIND_CFG"

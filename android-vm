@@ -250,16 +250,16 @@ cmd_reset() {
     cmd_stop "$device_profile"
   fi
 
-  local udata="${ROOT}/userdata/userdata-${device_profile}.qcow2"
-  local size
-  size=$(cfg_get '.userdata_size' "8G")
+  local img="${ROOT}/builds/android11-${device_profile}-latest.qcow2"
+  [ -f "$img" ] || die "No built image for '${device_profile}': ${img}"
 
-  if [ -f "$udata" ]; then
-    log "Deleting userdata: $udata"
-    rm -f "$udata"
-  fi
-  qemu-img create -f qcow2 "$udata" "$size"
-  ok "Userdata reset for '${device_profile}' (${size}, empty)"
+  log "Reformatting userdata partition (sda3) in $(basename "$img") ..."
+  sudo modprobe nbd max_part=8
+  sudo qemu-nbd --connect=/dev/nbd0 "$img"
+  sleep 1
+  sudo mkfs.ext4 -F -L Userdata /dev/nbd0p3
+  sudo qemu-nbd --disconnect /dev/nbd0
+  ok "Userdata reset for '${device_profile}' (sda3 reformatted as ext4)"
 }
 
 # ── cmd_update ────────────────────────────────────────────────────────────────
@@ -561,7 +561,6 @@ cmd_status() {
     [ -z "$profile" ] && continue
     local pid_file="${ROOT}/run/${profile}.pid"
     local img="${ROOT}/builds/android11-${profile}-latest.qcow2"
-    local udata="${ROOT}/userdata/userdata-${profile}.qcow2"
 
     # Determine running state
     local state pid uptime_str=""
@@ -605,12 +604,11 @@ cmd_status() {
           printf "    SPICE/VNC port 5900 open\n"
       fi
 
-      # Show image and userdata sizes
+      # Show image size
       if [ -f "$img" ]; then
-        local img_sz udata_sz=""
+        local img_sz
         img_sz=$(du -sh "$img" 2>/dev/null | cut -f1)
-        [ -f "$udata" ] && udata_sz="  userdata: $(du -sh "$udata" 2>/dev/null | cut -f1)"
-        printf "    image: %-8s%s\n" "$img_sz" "$udata_sz"
+        printf "    image: %s\n" "$img_sz"
       fi
     fi
   done
