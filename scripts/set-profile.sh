@@ -98,25 +98,29 @@ else
   sudo modprobe nbd max_part=8
   sleep 1
 
-  log "Connecting image via NBD ..."
-  sudo qemu-nbd --connect=/dev/nbd0 "$OUT_IMG"
-  sleep 2
-
   mkdir -p "$MNT_ANDROID" "$MNT_SYSTEM" "$MNT_VENDOR" "$MNT_PRODUCT"
 
   SYSTEM_IMG_MOUNTED=false
   VENDOR_IMG_MOUNTED=false
   PRODUCT_IMG_MOUNTED=false
+  NBD_CONNECTED=false
 
+  # Arm the trap BEFORE qemu-nbd connects so a failure between connect and the
+  # first mount still releases the NBD device.
   cleanup() {
     log "Unmounting partitions ..."
     $PRODUCT_IMG_MOUNTED && sudo umount "$MNT_PRODUCT" 2>/dev/null || true
     $VENDOR_IMG_MOUNTED  && sudo umount "$MNT_VENDOR"  2>/dev/null || true
     $SYSTEM_IMG_MOUNTED  && sudo umount "$MNT_SYSTEM"  2>/dev/null || true
     sudo umount "$MNT_ANDROID" 2>/dev/null || true
-    sudo qemu-nbd --disconnect /dev/nbd0 2>/dev/null || true
+    $NBD_CONNECTED && sudo qemu-nbd --disconnect /dev/nbd0 2>/dev/null || true
   }
   trap cleanup EXIT
+
+  log "Connecting image via NBD ..."
+  sudo qemu-nbd --connect=/dev/nbd0 "$OUT_IMG"
+  NBD_CONNECTED=true
+  sleep 2
 
   log "Partition layout:"
   lsblk /dev/nbd0

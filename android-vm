@@ -257,8 +257,12 @@ cmd_reset() {
   sudo modprobe nbd max_part=8
   sudo qemu-nbd --connect=/dev/nbd0 "$img"
   sleep 1
-  sudo mkfs.ext4 -F -L Userdata /dev/nbd0p2
+  # Capture the mkfs result so the NBD device is always disconnected, even on
+  # failure, before reporting the error.
+  local mkfs_rc=0
+  sudo mkfs.ext4 -F -L Userdata /dev/nbd0p2 || mkfs_rc=$?
   sudo qemu-nbd --disconnect /dev/nbd0
+  [ "$mkfs_rc" -eq 0 ] || die "mkfs.ext4 failed (exit ${mkfs_rc}) — userdata not reset"
   ok "Userdata reset for '${device_profile}' (sda2 reformatted as ext4)"
 }
 

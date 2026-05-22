@@ -9,7 +9,6 @@ on:
       - 'androiddistro/**'
       - 'scripts/lib/inject-gapps.sh'
       - 'scripts/lib/inject-arm-trans.sh'
-      - 'scripts/build-intermediate.sh'
       - '.github/workflows/build-base.yml'
   schedule:
     # Rebuild monthly to pick up updated GApps packages
