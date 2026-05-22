@@ -253,8 +253,8 @@ fi
 
 cd "$WORKSPACE_DIR"
 
-mkdir -p base intermediate builds profiles scripts/lib arm-trans gapps \
-         logs userdata mnt/{system,vendor,product} run cache \
+mkdir -p intermediate builds profiles scripts/lib arm-trans gapps \
+         logs mnt/{system,vendor,product} run cache \
          config/vm-profiles
 ok "Workspace ready at ${WORKSPACE_DIR}"
 
@@ -285,7 +285,7 @@ phase "Base images"
 
 OWNER_REPO=$(echo "$REPO_URL" \
   | sed 's|.*github\.com[:/]\(.*\)\.git$|\1|; s|.*github\.com[:/]\(.*\)|\1|')
-BLISS_INTERMEDIATE="intermediate/blissos14-gapps-arm.qcow2"
+BLISS_INTERMEDIATE="intermediate/$(jq -r '.base_image' androiddistro/bliss14.json)"
 
 if $NO_DOWNLOAD; then
   log "--no-download: building bliss14 intermediate locally (~30–90 min)"
@@ -307,10 +307,14 @@ else
       continue
     fi
 
+    base_name="${base_image%.qcow2}"
     log "Downloading ${slug}: ${base_image} ..."
     if ROOT="${WORKSPACE_DIR}" bash scripts/lib/fetch-release.sh \
         "$OWNER_REPO" "${base_image}*" "intermediate/" \
-        --tag-prefix "${slug}-base-"; then
+        --tag-prefix "${slug}-base-" \
+        --also "${base_name}-kernel" \
+        --also "${base_name}-initrd.img" \
+        --also "${base_name}-cmdline"; then
       ok "${slug}: ready ($(du -sh "$dest" | cut -f1))"
     else
       warn "${slug}: no GitHub Release found — skipping"
@@ -389,20 +393,7 @@ bash scripts/set-profile.sh "$STARTER_PROFILE"
 ok "Profile image built"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHASE 7 — Create userdata volume
-# ─────────────────────────────────────────────────────────────────────────────
-phase "Userdata volume"
-
-UDATA="userdata/userdata-${STARTER_PROFILE}.qcow2"
-if [ -f "$UDATA" ]; then
-  ok "Userdata volume already exists — leaving it intact"
-else
-  qemu-img create -f qcow2 "$UDATA" 8G
-  ok "Userdata volume created (8 GB, sparse)"
-fi
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PHASE 8 — Optionally boot and verify
+# PHASE 7 — Optionally boot and verify
 # ─────────────────────────────────────────────────────────────────────────────
 if $DO_BOOT; then
   phase "Booting VM"
@@ -458,10 +449,8 @@ Quick reference:
 
 Workspace layout:
   android-vm     → unified CLI (also at /usr/local/bin/android-vm)
-  base/          → read-only source image (never boot this)
-  intermediate/  → GApps + ARM trans baked in (never boot this)
+  intermediate/  → per-distro base image (never boot this)
   builds/        → per-profile bootable images  ← boot these
-  userdata/      → per-profile userdata volumes
   profiles/      → JSON device identity profiles
   config/        → defaults.json, device-spoof.json, vm-profiles/
   logs/          → build and verify logs
