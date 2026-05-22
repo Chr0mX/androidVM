@@ -1,6 +1,6 @@
 # Android 11 x86_64 VM — Build & Profile System
 
-Bootable Android 11 x86_64 QEMU/KVM image with pre-integrated GApps, ARM translation (`libndk_translation`), and a deterministic pre-boot profile patcher that produces per-identity image artifacts with zero runtime spoofing dependencies.
+Bootable Android 11 x86_64 QEMU/KVM image with a deterministic pre-boot profile patcher that produces per-identity image artifacts with zero runtime spoofing dependencies. The VM boots the distro kernel directly through QEMU (`-kernel`/`-initrd`) — no GRUB, no UEFI/OVMF firmware.
 
 ---
 
@@ -189,23 +189,26 @@ Install libvirt tools: `sudo apt install virt-manager libvirt-clients` (Ubuntu/D
 ```bash
 # Ubuntu / Debian
 sudo apt install qemu-system-x86 qemu-utils qemu-kvm android-tools-adb \
-                 simg2img python3 python3-pip jq curl rsync ovmf p7zip-full
+                 simg2img python3 python3-pip jq curl rsync p7zip-full
 pip3 install jsonschema
 ```
 
-## UEFI Firmware (OVMF)
+## Direct Kernel Boot
 
-The VM boots via UEFI and needs OVMF firmware. `scripts/boot.sh` resolves it in
-two steps:
+The VM boots the distro kernel directly through QEMU's `-kernel` / `-initrd` /
+`-append` — there is no GRUB and no UEFI/OVMF firmware. Three small **sidecar**
+files are extracted from the distro ISO and stored next to each image:
 
-1. **Config first** — `ovmf_path` and `ovmf_vars_template` from
-   `config/defaults.json` are used when set and the file exists.
-2. **Fallback scan** — otherwise `boot.sh` scans a built-in list of common
-   package locations (`/usr/share/OVMF/…`, `/usr/share/ovmf/…`,
-   `/usr/share/edk2/…`).
+- `<name>-kernel`      — the Linux kernel
+- `<name>-initrd.img`  — the Android-x86 initrd
+- `<name>-cmdline`     — kernel parameters captured from the ISO (`HWC=`,
+  `GRALLOC=`, `androidboot.*`, …)
 
-To pin a specific firmware, set the two paths in `config/defaults.json` — that
-is the supported override.
+`fetch-distro.sh` produces them alongside `intermediate/<base>.qcow2`,
+`set-profile.sh` copies them into `builds/`, and `boot.sh` composes the final
+command line (`root=/dev/ram0 … SRC= DATA=/dev/sda2 console=ttyS0 …`) and hands
+the sidecars to QEMU. `boot.sh --debug` shapes kernel parameters at runtime — no
+image rebuild needed.
 
 ## Workspace Layout
 
@@ -214,8 +217,7 @@ workspace/
 ├── android-vm              # Unified CLI (symlinked to /usr/local/bin)
 ├── install.sh              # One-liner installer
 ├── androiddistro/          # Per-distro build config (bliss14.json, sakura.json, …)
-├── base/                   # Master read-only image — never boot directly
-├── intermediate/           # GApps + ARM trans baked in, still read-only
+├── intermediate/           # Per-distro base image + boot sidecars — never boot directly
 ├── builds/                 # Final per-profile artifacts  ← boot these
 ├── run/                    # Runtime PID files
 ├── cache/                  # Download cache (ISOs, split archive parts — gitignored)
@@ -233,7 +235,6 @@ workspace/
 │   ├── pixel7-ap1a.json
 │   └── samsung-s23-eu.json
 ├── scripts/
-│   ├── build-intermediate.sh   # Legacy: manual intermediate build (use fetch-distro.sh instead)
 │   ├── set-profile.sh          # Create per-profile build
 │   ├── boot.sh                 # Launch VM in QEMU/KVM
 │   ├── verify.sh               # ADB-based verification
@@ -256,20 +257,19 @@ workspace/
 qcow2 backing chain — only the final layer stores diffs per profile:
 
 ```
-android11-base.qcow2           (raw source, never modified)
+intermediate/<distro>-base.qcow2   (built from the distro ISO by fetch-distro.sh)
        ↓ backing-file
-blissos14-gapps-arm.qcow2      (+ GApps + ARM trans, built once)
-       ↓ backing-file
-android11-<profile>.qcow2      (+ identity props, one per profile)
+builds/android11-<profile>.qcow2   (+ identity props, one per profile)
 ```
 
-Each image is a single SCSI disk (`/dev/sda`) with three GPT partitions:
+The kernel, initrd and cmdline live outside the qcow2 as sidecar files (see
+*Direct Kernel Boot* above). Each image is a single SCSI disk (`/dev/sda`) with
+two GPT partitions:
 
 | Partition | Label | FS | Contents |
 |---|---|---|---|
-| `/dev/sda1` | EFI | FAT32 | GRUB EFI binary, kernel, initrd |
-| `/dev/sda2` | BlissOS | ext4 | system.img, vendor.img, grub.cfg |
-| `/dev/sda3` | Userdata | ext4 | Android userdata (reset with `android-vm reset`) |
+| `/dev/sda1` | Data | ext4 | system.img, vendor.img, product.img |
+| `/dev/sda2` | Userdata | ext4 | Android userdata (reset with `android-vm reset`) |
 
 ## Profile System
 
@@ -330,12 +330,17 @@ android-vm reset pixel6a-bp1a
 
 ## Multiple Distros
 
-The `androiddistro/` directory contains per-distro JSON configs that control the entire build pipeline. Two distros are included:
+The `androiddistro/` directory contains per-distro JSON configs that control the entire build pipeline. Three distros are included:
 
-| Slug | Name | GApps | Source | GRUB HWC/GRALLOC |
-|---|---|---|---|---|
-| `bliss14` | BlissOS 14 | ✓ OpenGApps pico | SourceForge (auto-latest) | `drm_minigbm` / `minigbm` |
-| `sakura` | Project Sakura 5.2 FOSS | ✗ (FOSS) | SourceForge (direct) | `drm` / `gbm` |
+| Slug | Name | GApps | Source |
+|---|---|---|---|
+| `bliss14` | BlissOS 14 | ✗ (FOSS) | SourceForge (auto-latest) |
+| `bliss15` | BlissOS 15 | ✗ (FOSS) | SourceForge (auto-latest) |
+| `sakura` | Project Sakura FOSS | ✗ (FOSS) | SourceForge (direct) |
+
+Graphics parameters (`HWC=`, `GRALLOC=`, …) are captured automatically from each
+ISO's own boot config into that distro's `-cmdline` sidecar — this project does
+not set them.
 
 ### Using Project Sakura
 
@@ -357,7 +362,7 @@ bash scripts/set-profile.sh pixel6a-bp1a --distro sakura --rebuild
 bash scripts/boot.sh pixel6a-bp1a --vnc    # VNC works; GL-accelerated display needs virgl
 ```
 
-> **Note:** Sakura requires `HWC=drm GRALLOC=gbm`. It is incompatible with `drm_minigbm` (causes a mouse crash on Sakura). Never mix Sakura's intermediate image with BlissOS GRUB params — `set-profile.sh --distro sakura` applies the correct values automatically.
+> **Note:** Sakura needs `HWC=drm GRALLOC=gbm` (incompatible with BlissOS's `drm_minigbm`). These values come from each distro's `-cmdline` sidecar, captured from the ISO at build time — `set-profile.sh --distro sakura` copies Sakura's own sidecars, so the parameters always match the image.
 
 ### Switching between distros
 
@@ -369,7 +374,7 @@ bash scripts/set-profile.sh pixel6a-bp1a --distro sakura  --rebuild
 bash scripts/set-profile.sh pixel6a-bp1a --distro bliss14 --rebuild
 ```
 
-The CI workflow (`build-base.yml`) builds both distros in parallel and publishes separate GitHub Releases. `android-vm update` downloads the latest of each automatically.
+The CI workflow (`build-base.yml`) builds all distros in parallel and publishes separate GitHub Releases. `android-vm update` downloads the latest of each automatically.
 
 ### Device Identity Spoofing
 
@@ -393,7 +398,7 @@ line, `android-vm` resolves the default device profile in this order:
 
 ## CI
 
-`.github/workflows/build-base.yml` builds the intermediate image and publishes it as a GitHub Release. Requires a self-hosted runner with KVM access tagged `self-hosted, linux, kvm`.
+`.github/workflows/build-base.yml` builds each distro's intermediate image (offline NBD mount + file injection — no KVM required) on standard GitHub-hosted runners and publishes it as a GitHub Release. The optional boot smoke-test runs only when a self-hosted KVM runner (`self-hosted, linux, kvm`) is available.
 
 See the workflow for cache key design and smoke-test details.
 
