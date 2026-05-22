@@ -588,20 +588,6 @@ jobs:
           path: image-cache/
           key: ${{ matrix.cache_key }}
 
-      # ── Pass image to validate-artifact via artifact (cache is too large / evicted) ──
-      - name: Upload image as workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: base-image-${{ matrix.distro }}
-          path: |
-            image-cache/${{ matrix.base_image }}
-            image-cache/${{ matrix.base_image }}.sha256
-            image-cache/${{ steps.base.outputs.name }}-kernel
-            image-cache/${{ steps.base.outputs.name }}-initrd.img
-            image-cache/${{ steps.base.outputs.name }}-cmdline
-          if-no-files-found: error
-          retention-days: 1
-
       # ── Release upload (always, build or cache) ────────────────────────────
       - name: Split large image for release upload
         id: split
@@ -681,11 +667,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends qemu-utils python3 jq
           pip3 install jsonschema --quiet
 
-      - name: Download image artifact
-        uses: actions/download-artifact@v4
+      - name: Restore image from cache
+        uses: actions/cache/restore@v4
         with:
-          name: base-image-${{ matrix.distro }}
           path: image-cache/
+          key: ${{ matrix.cache_key }}
 
       - name: Verify image integrity
         run: |
