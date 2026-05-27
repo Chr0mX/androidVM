@@ -292,6 +292,9 @@ cmd_update() {
         slug=$(       jq -r '.slug'       "$distro_cfg" 2>/dev/null) || continue
         base_image=$( jq -r '.base_image' "$distro_cfg" 2>/dev/null) || continue
         local base_name="${base_image%.qcow2}"
+        local intermediate_path="${ROOT}/intermediate/${base_image}"
+        local old_mtime=""
+        [ -f "$intermediate_path" ] && old_mtime=$(stat -c%Y "$intermediate_path" 2>/dev/null || true)
         log "Checking for updated intermediate: ${slug} (${base_image})..."
         ROOT="${ROOT}" bash "$fetch_script" \
           "$owner_repo" "${base_image}*" "${ROOT}/intermediate/" \
@@ -301,15 +304,33 @@ cmd_update() {
           --also "${base_name}-cmdline" \
           && updated=$(( updated + 1 )) \
           || warn "No GitHub Release found for '${slug}' — build locally: bash scripts/lib/fetch-distro.sh ${slug}"
+        # Purge profile overlays backed by this intermediate if it was replaced
+        if [ -f "$intermediate_path" ]; then
+          local new_mtime
+          new_mtime=$(stat -c%Y "$intermediate_path" 2>/dev/null || true)
+          if [ -n "$old_mtime" ] && [ "$new_mtime" != "$old_mtime" ]; then
+            local abs_intermediate stale=0
+            abs_intermediate=$(realpath "$intermediate_path")
+            for link in "${ROOT}"/builds/android11-*-latest.qcow2; do
+              [ -L "$link" ] || continue
+              local target backing
+              target=$(readlink -f "$link")
+              [ -f "$target" ] || continue
+              backing=$(qemu-img info --output=json "$target" 2>/dev/null \
+                | jq -r '."full-backing-filename" // ""' 2>/dev/null || true)
+              [ "$(realpath "$backing" 2>/dev/null)" = "$abs_intermediate" ] || continue
+              local pname
+              pname=$(basename "$link" | sed 's/android11-//;s/-latest\.qcow2//')
+              warn "Removing stale build '${pname}' — ${slug} intermediate was updated"
+              rm -f "$link" "$target"
+              stale=$(( stale + 1 ))
+            done
+            [ "$stale" -gt 0 ] && \
+              log "Removed ${stale} stale build(s) — rebuild: bash scripts/set-profile.sh <name> --rebuild"
+          fi
+        fi
       done
       ok "${updated} distro image(s) checked/updated"
-      log "Rebuild profiles to apply updated images:"
-      for f in "${ROOT}"/builds/android11-*-latest.qcow2; do
-        [ -L "$f" ] || continue
-        local pname
-        pname=$(basename "$f" | sed 's/android11-//;s/-latest\.qcow2//')
-        log "  bash scripts/set-profile.sh ${pname} --rebuild"
-      done
     else
       warn "Cannot determine GitHub repo from remote URL — skipping image update"
     fi
@@ -361,15 +382,24 @@ cmd_doctor() {
   fi
 
   printf "\n${DIM}━━━ Images ━━━${NC}\n"
-  local intermediate="${ROOT}/intermediate/blissos14-gapps-arm.qcow2"
-  if [ -f "$intermediate" ]; then
-    local sz
-    sz=$(du -sh "$intermediate" 2>/dev/null | cut -f1)
-    check_ok "Intermediate image  (${sz})"
-  else
-    check_fail "Intermediate image missing: ${intermediate}"
-    check_warn "Download with: android-vm update  or  bash install.sh"
-  fi
+  local found_intermediates=0
+  for distro_cfg in "${ROOT}"/androiddistro/*.json; do
+    [ -f "$distro_cfg" ] || continue
+    local slug base_image intermediate
+    slug=$(      jq -r '.slug'       "$distro_cfg" 2>/dev/null) || continue
+    base_image=$(jq -r '.base_image' "$distro_cfg" 2>/dev/null) || continue
+    intermediate="${ROOT}/intermediate/${base_image}"
+    if [ -f "$intermediate" ]; then
+      local sz
+      sz=$(du -sh "$intermediate" 2>/dev/null | cut -f1)
+      check_ok "Intermediate: ${slug}  (${sz})"
+      found_intermediates=$(( found_intermediates + 1 ))
+    else
+      check_fail "Intermediate missing: ${slug} (${base_image})"
+      check_warn "Download with: android-vm update  or  bash install.sh"
+    fi
+  done
+  [ "$found_intermediates" -eq 0 ] && check_warn "No intermediates found — run: android-vm update"
 
   local found_builds=0
   for img in "${ROOT}"/builds/android11-*-latest.qcow2; do
