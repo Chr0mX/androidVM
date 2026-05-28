@@ -125,54 +125,52 @@ else
   log "Partition layout:"
   lsblk /dev/nbd0
 
-  # p1 = Android data partition (system.img, vendor.img, etc.)
+  # p1 = Android data partition (android/ subdir with system.sfs, vendor.img, etc.)
   sudo mount /dev/nbd0p1 "$MNT_ANDROID"
 
-  # Loop-mount the inner system.img to reach the actual Android system files
-  if [ -f "${MNT_ANDROID}/system.img" ]; then
-    sudo mount -o loop,rw "${MNT_ANDROID}/system.img" "$MNT_SYSTEM"
+  # system is now system.sfs (squashfs — read-only, cannot be patched in place)
+  ANDROID_DIR="${MNT_ANDROID}/android"
+  if sudo test -f "${ANDROID_DIR}/system.sfs"; then
+    log "system.sfs present (squashfs — read-only, system props not patchable)"
+    SYS_DIR=""
+  elif sudo test -f "${ANDROID_DIR}/system.img"; then
+    sudo mount -o loop,rw "${ANDROID_DIR}/system.img" "$MNT_SYSTEM"
     SYSTEM_IMG_MOUNTED=true
-    log "Mounted system.img (loop)"
+    log "Mounted android/system.img (loop)"
+    if sudo test -f "${MNT_SYSTEM}/build.prop" || sudo test -d "${MNT_SYSTEM}/app"; then
+      SYS_DIR="$MNT_SYSTEM"
+    elif sudo test -f "${MNT_SYSTEM}/system/build.prop"; then
+      SYS_DIR="${MNT_SYSTEM}/system"
+    else
+      SYS_DIR="$MNT_SYSTEM"
+    fi
+    log "System layout: ${SYS_DIR}"
   else
-    die "system.img not found on data partition (${MNT_ANDROID}) — is this a valid Android-x86 image? (distro: ${DISTRO_NAME})"
+    die "No android/system.sfs or android/system.img on data partition — is this a v8+ image? (distro: ${DISTRO_NAME})"
   fi
 
-  # Detect system layout: system-partition image vs rootfs image
-  # Use sudo test — files in the mounted ext4 may be root-owned with 600/700 perms
-  if sudo test -f "${MNT_SYSTEM}/build.prop" || sudo test -d "${MNT_SYSTEM}/app" || sudo test -d "${MNT_SYSTEM}/lib"; then
-    SYS_DIR="$MNT_SYSTEM"
-    log "Layout: system-partition (build.prop at ${SYS_DIR}/)"
-  elif sudo test -f "${MNT_SYSTEM}/system/build.prop" || sudo test -d "${MNT_SYSTEM}/system/app"; then
-    SYS_DIR="${MNT_SYSTEM}/system"
-    log "Layout: rootfs (build.prop at ${SYS_DIR}/)"
-  else
-    SYS_DIR="$MNT_SYSTEM"
-    log "Layout: unknown — defaulting to system-partition"
-  fi
-
-  # Vendor: separate vendor.img or directory inside system
-  if [ -f "${MNT_ANDROID}/vendor.img" ]; then
-    sudo mount -o loop,rw "${MNT_ANDROID}/vendor.img" "$MNT_VENDOR"
+  # Vendor: android/vendor.img (raw ext4 when ARM trans injected, sfs otherwise)
+  VENDOR_DIR=""
+  if sudo test -f "${ANDROID_DIR}/vendor.img"; then
+    sudo mount -o loop,rw "${ANDROID_DIR}/vendor.img" "$MNT_VENDOR"
     VENDOR_IMG_MOUNTED=true
     VENDOR_DIR="$MNT_VENDOR"
-    log "Mounted vendor.img (loop)"
-  else
+    log "Mounted android/vendor.img (loop)"
+  elif [ -n "$SYS_DIR" ] && sudo test -d "${SYS_DIR}/vendor"; then
     VENDOR_DIR="${SYS_DIR}/vendor"
     log "Vendor: using ${VENDOR_DIR}"
   fi
 
-  # Product: separate product.img, directory inside system, or skip
-  if [ -f "${MNT_ANDROID}/product.img" ]; then
-    sudo mount -o loop,rw "${MNT_ANDROID}/product.img" "$MNT_PRODUCT"
+  # Product
+  PRODUCT_DIR=""
+  if sudo test -f "${ANDROID_DIR}/product.img"; then
+    sudo mount -o loop,rw "${ANDROID_DIR}/product.img" "$MNT_PRODUCT"
     PRODUCT_IMG_MOUNTED=true
     PRODUCT_DIR="$MNT_PRODUCT"
-    log "Mounted product.img (loop)"
-  elif [ -d "${SYS_DIR}/product" ]; then
+    log "Mounted android/product.img (loop)"
+  elif [ -n "$SYS_DIR" ] && sudo test -d "${SYS_DIR}/product"; then
     PRODUCT_DIR="${SYS_DIR}/product"
     log "Product: using ${PRODUCT_DIR}"
-  else
-    PRODUCT_DIR=""
-    log "No product partition — skipping"
   fi
 
   # ── Patch props (sudo required — files owned by root in mounted ext4) ────
@@ -184,22 +182,26 @@ else
 
   if [ "$SPOOF_ENABLED" = "true" ]; then
     if contains_partition "system"; then
-      log "Patching system/build.prop ..."
-      sudo python3 "${SCRIPT_DIR}/lib/patch-props.py" \
-        "${SYS_DIR}/build.prop" system "$PROFILE_FILE"
+      if [ -n "$SYS_DIR" ]; then
+        log "Patching system/build.prop ..."
+        sudo python3 "${SCRIPT_DIR}/lib/patch-props.py" \
+          "${SYS_DIR}/build.prop" system "$PROFILE_FILE"
+      else
+        log "WARNING: system is squashfs (system.sfs) — system prop patching skipped"
+      fi
     else
       log "Skipping system prop patching (device-spoof.json: patch_partitions)"
     fi
 
     if contains_partition "vendor"; then
-      if sudo test -f "${VENDOR_DIR}/build.prop"; then
+      if [ -n "$VENDOR_DIR" ] && sudo test -f "${VENDOR_DIR}/build.prop"; then
         log "Patching vendor/build.prop ..."
         sudo python3 "${SCRIPT_DIR}/lib/patch-props.py" \
           "${VENDOR_DIR}/build.prop" vendor "$PROFILE_FILE"
       else
-        log "WARNING: vendor/build.prop not found at ${VENDOR_DIR}/build.prop"
+        log "WARNING: vendor/build.prop not found — skipping"
       fi
-      if sudo test -f "${VENDOR_DIR}/default.prop"; then
+      if [ -n "$VENDOR_DIR" ] && sudo test -f "${VENDOR_DIR}/default.prop"; then
         log "Patching vendor/default.prop ..."
         sudo python3 "${SCRIPT_DIR}/lib/patch-props.py" \
           "${VENDOR_DIR}/default.prop" vendor "$PROFILE_FILE"

@@ -144,13 +144,11 @@ mkdir -p "$WORK" "$ISO_DIR" "${ROOT}/intermediate"
 
 cleanup_work() {
   log "Cleaning up work directory..."
-  sudo umount "${WORK}/iso-mount"  2>/dev/null || true
-  sudo umount "${WORK}/mnt/vendor" 2>/dev/null || true
-  sudo umount "${WORK}/mnt/product" 2>/dev/null || true
-  sudo umount "${WORK}/mnt/system" 2>/dev/null || true
+  sudo umount "${WORK}/mnt/vendor"  2>/dev/null || true
   sudo umount "${WORK}/mnt/android" 2>/dev/null || true
   [ -n "${LOOP_DEV:-}" ] && sudo losetup -d "$LOOP_DEV" 2>/dev/null || true
-  rm -rf "${WORK}/sfs-*" "${WORK}/"*.raw "${WORK}/disk.raw" "${WORK}/boot-*" 2>/dev/null || true
+  sudo rm -rf "${WORK}/vendor-sq" 2>/dev/null || true
+  rm -rf "${WORK}/"*.raw "${WORK}/disk.raw" "${WORK}/iso-extract" 2>/dev/null || true
 }
 trap cleanup_work EXIT
 
@@ -168,140 +166,69 @@ file "$ISO_PATH" | grep -qi "ISO 9660\|CD-ROM" \
   || die "Downloaded file is not a valid ISO (got: $(file "$ISO_PATH"))"
 log "ISO ready: ${ISO_PATH} ($(du -sh "$ISO_PATH" | cut -f1))"
 
-# ── Extract partition images from ISO ─────────────────────────────────────────
-log "Extracting partition images from ISO..."
-mkdir -p "${WORK}/iso-mount"
-sudo mount -o loop,ro "$ISO_PATH" "${WORK}/iso-mount"
+# ── Extract files from ISO (7z — no sudo loop-mount needed) ──────────────────
+log "Extracting files from ISO via 7z..."
+EXTRACT="${WORK}/iso-extract"
+mkdir -p "$EXTRACT"
+7z x -y -bb0 -o"$EXTRACT" "$ISO_PATH" \
+    kernel initrd.img ramdisk.img \
+    system.sfs system.img \
+    vendor.sfs vendor.img \
+    product.sfs product.img \
+    '*.cfg' -r >/dev/null 2>&1 || true
 
-log "ISO contents:"
-ls -la "${WORK}/iso-mount/"
+# Flatten nested files to extract root
+find "$EXTRACT" -mindepth 2 -type f \( \
+    -name kernel -o -name initrd.img -o -name ramdisk.img \
+    -o -name 'system.sfs' -o -name 'system.img' \
+    -o -name 'vendor.sfs' -o -name 'vendor.img' \
+    -o -name 'product.sfs' -o -name 'product.img' \) \
+  -exec mv -n {} "$EXTRACT/" \; 2>/dev/null || true
 
-FOUND=0
-for name in system vendor product; do
-  sfs="${WORK}/iso-mount/${name}.sfs"
-  img_direct="${WORK}/iso-mount/${name}.img"
-  img_subdir="${WORK}/iso-mount/${name}/${name}.img"
+# Consolidate *.cfg into _cfg/ (avoids name collisions)
+mkdir -p "$EXTRACT/_cfg"
+find "$EXTRACT" -mindepth 2 -type f -name '*.cfg' \
+  -exec mv -n {} "$EXTRACT/_cfg/" \; 2>/dev/null || true
+find "$EXTRACT" -mindepth 1 -type d -empty -delete 2>/dev/null || true
 
-  if [ -f "$sfs" ]; then
-    sz=$(du -sh "$sfs" | cut -f1)
-    log "Unsquashing ${name}.sfs (${sz})..."
-    sudo unsquashfs -d "${WORK}/sfs-${name}" "$sfs"
-    for inner in \
-      "${WORK}/sfs-${name}/${name}.img" \
-      "${WORK}/sfs-${name}/system.img" \
-      "${WORK}/sfs-${name}/${name}/${name}.img"; do
-      if [ -f "$inner" ]; then
-        mv "$inner" "${WORK}/${name}.img"
-        FOUND=$(( FOUND + 1 ))
-        break
-      fi
-    done
-    sudo rm -rf "${WORK}/sfs-${name}"
-  elif [ -f "$img_direct" ]; then
-    cp "$img_direct" "${WORK}/${name}.img"
-    FOUND=$(( FOUND + 1 ))
-  elif [ -f "$img_subdir" ]; then
-    cp "$img_subdir" "${WORK}/${name}.img"
-    FOUND=$(( FOUND + 1 ))
-  fi
-done
+log "Extracted: $(ls "$EXTRACT" | tr '\n' ' ')"
 
-# Copy boot files
-for item in kernel initrd.img ramdisk.img isolinux grub efi; do
-  [ -e "${WORK}/iso-mount/${item}" ] \
-    && cp -r "${WORK}/iso-mount/${item}" "${WORK}/boot-${item}" || true
-done
-
-sudo umount "${WORK}/iso-mount"
-rmdir "${WORK}/iso-mount"
+[ -f "$EXTRACT/kernel" ]     || die "kernel not found in ISO"
+[ -f "$EXTRACT/initrd.img" ] \
+  || [ -f "$EXTRACT/ramdisk.img" ] \
+  || die "initrd.img / ramdisk.img not found in ISO"
+[ -f "$EXTRACT/system.sfs" ] || [ -f "$EXTRACT/system.img" ] \
+  || die "No system.sfs or system.img found in ISO"
 
 if ! $SIDECARS_ONLY; then
 
-[ "$FOUND" -gt 0 ] || die "No partition images (.sfs or .img) found in ISO"
-log "Extracted ${FOUND} partition image(s)"
-ls -lh "${WORK}/"*.img 2>/dev/null || true
-
-# ── Convert sparse images to raw ext4 ─────────────────────────────────────────
-log "Converting partition images (sparse → raw)..."
-for name in system vendor product; do
-  src="${WORK}/${name}.img"
-  dst="${WORK}/${name}.raw"
-  [ -f "$src" ] || continue
-  simg2img "$src" "$dst" 2>/dev/null \
-    && log "  ${name}: sparse → raw" \
-    || { cp "$src" "$dst"; log "  ${name}: already raw (not sparse)"; }
-  rm -f "$src"
-done
-
-# ── Resize system partition if GApps will be injected ────────────────────────
-if [ "$INJECT_GAPPS" = "true" ]; then
-  log "Resizing system partition (+600 MB for GApps)..."
-  e2fsck -yf "${WORK}/system.raw" || true
-  truncate -s +600M "${WORK}/system.raw"
-  resize2fs "${WORK}/system.raw"
-  e2fsck -yf "${WORK}/system.raw" || true
-fi
-
-# ── Mount partition images ─────────────────────────────────────────────────────
-log "Mounting partition images..."
-mkdir -p "${WORK}/mnt/system" "${WORK}/mnt/product"
-sudo mount -o loop,rw "${WORK}/system.raw" "${WORK}/mnt/system"
-
-if [ -f "${WORK}/product.raw" ]; then
-  sudo mount -o loop,rw "${WORK}/product.raw" "${WORK}/mnt/product"
-else
-  log "No product partition — product injection skipped"
-fi
-
-# Detect system layout
-if [ -f "${WORK}/mnt/system/build.prop" ] || \
-   [ -d "${WORK}/mnt/system/app" ]        || \
-   [ -d "${WORK}/mnt/system/lib" ]; then
-  SYS="${WORK}/mnt/system"
-  log "Layout: system-partition (system files at mnt/system/)"
-elif [ -f "${WORK}/mnt/system/system/build.prop" ] || \
-     [ -d "${WORK}/mnt/system/system/app" ]; then
-  SYS="${WORK}/mnt/system/system"
-  log "Layout: rootfs (system files at mnt/system/system/)"
-else
-  SYS="${WORK}/mnt/system"
-  log "Layout: unknown — defaulting to mnt/system/"
-fi
-
-# Vendor: separate vendor.raw or directory inside system
-if [ -f "${WORK}/vendor.raw" ]; then
-  mkdir -p "${WORK}/mnt/vendor"
-  sudo mount -o loop,rw "${WORK}/vendor.raw" "${WORK}/mnt/vendor"
-  VENDOR="${WORK}/mnt/vendor"
-  log "Mounted vendor.raw"
-else
-  VENDOR="${SYS}/vendor"
-  sudo mkdir -p "$VENDOR"
-  log "Vendor: using ${VENDOR}"
-fi
-
-# ── Inject GApps ──────────────────────────────────────────────────────────────
-if [ "$INJECT_GAPPS" = "true" ]; then
-  log "Injecting GApps from ${GAPPS_ZIP}..."
-  sudo bash "${SCRIPT_DIR}/inject-gapps.sh" \
-    "$GAPPS_ZIP" "$SYS" "${WORK}/mnt/product"
-  # Verify GmsCore was installed
-  gms_ok=false
-  for d in com.google.android.gms PrebuiltGmsCore GmsCore; do
-    sudo test -d "${SYS}/priv-app/${d}" && { gms_ok=true; break; }
-  done
-  $gms_ok || warn "GmsCore not found after GApps injection — check ${GAPPS_ZIP}"
-fi
-
-# ── Inject ARM translation ─────────────────────────────────────────────────────
+# ── Inject ARM translation into vendor (vendor.sfs → vendor.img → inject) ────
 if [ "$INJECT_ARM_TRANS" = "true" ]; then
-  log "Injecting ARM translation libs..."
-  sudo bash "${SCRIPT_DIR}/inject-arm-trans.sh" \
-    "$ARM_TRANS_DIR" "$VENDOR"
-
-  # ── Write ARM bridge props ───────────────────────────────────────────────────
-  log "Writing ARM bridge props to vendor/build.prop..."
-  VPROP="${VENDOR}/build.prop"
+  log "Extracting vendor for ARM translation injection..."
+  if [ -f "$EXTRACT/vendor.sfs" ]; then
+    sudo unsquashfs -d "${WORK}/vendor-sq" "$EXTRACT/vendor.sfs"
+    _vendor_inner=""
+    for _vi in "${WORK}/vendor-sq/vendor.img" "${WORK}/vendor-sq/system.img"; do
+      [ -f "$_vi" ] && { _vendor_inner="$_vi"; break; }
+    done
+    [ -n "$_vendor_inner" ] || die "No vendor.img inside vendor.sfs"
+    cp "$_vendor_inner" "${WORK}/vendor.img"
+    sudo rm -rf "${WORK}/vendor-sq"
+  elif [ -f "$EXTRACT/vendor.img" ]; then
+    cp "$EXTRACT/vendor.img" "${WORK}/vendor.img"
+  else
+    die "No vendor.sfs or vendor.img in ISO for ARM injection"
+  fi
+  # Handle Android sparse format
+  if file "${WORK}/vendor.img" | grep -qi "Android sparse"; then
+    simg2img "${WORK}/vendor.img" "${WORK}/vendor.raw" \
+      && mv "${WORK}/vendor.raw" "${WORK}/vendor.img"
+  fi
+  mkdir -p "${WORK}/mnt/vendor"
+  sudo mount -o loop,rw "${WORK}/vendor.img" "${WORK}/mnt/vendor"
+  sudo bash "${SCRIPT_DIR}/inject-arm-trans.sh" "$ARM_TRANS_DIR" "${WORK}/mnt/vendor"
+  log "Writing ARM bridge props..."
+  VPROP="${WORK}/mnt/vendor/build.prop"
   sudo touch "$VPROP"
   for kv in \
     "ro.product.cpu.abilist=x86_64,x86,arm64-v8a,armeabi-v7a,armeabi" \
@@ -317,52 +244,67 @@ if [ "$INJECT_ARM_TRANS" = "true" ]; then
     if sudo grep -q "^${key}=" "$VPROP" 2>/dev/null; then
       sudo sed -i "s|^${key}=.*|${kv}|" "$VPROP"
     else
-      echo "$kv" | sudo tee -a "$VPROP" > /dev/null
+      echo "$kv" | sudo tee -a "$VPROP" >/dev/null
     fi
   done
-  sudo grep "ro\.dalvik\|ro\.enable\.native\|abilist" "$VPROP" || true
+  sudo umount "${WORK}/mnt/vendor"
+  sudo rmdir  "${WORK}/mnt/vendor"
+  log "ARM translation injected into vendor.img"
 fi
 
-# ── Unmount partition images ──────────────────────────────────────────────────
-log "Unmounting partition images..."
-[ -f "${WORK}/vendor.raw" ] && { sudo umount "${WORK}/mnt/vendor" 2>/dev/null || true; }
-sudo umount "${WORK}/mnt/product" 2>/dev/null || true
-sudo umount "${WORK}/mnt/system"  2>/dev/null || true
+# ── Stage files in android/ subdir (mirrors do_install) ──────────────────────
+log "Staging files into android/ subdir..."
+mkdir -p "${WORK}/stage/android"
 
-# ── Assemble bootable disk (GPT: ext4 Android data p1 + ext4 Userdata p2) ──
+# Kernel and initrd
+cp "$EXTRACT/kernel" "${WORK}/stage/android/kernel"
+if   [ -f "$EXTRACT/initrd.img"  ]; then cp "$EXTRACT/initrd.img"  "${WORK}/stage/android/initrd.img"
+elif [ -f "$EXTRACT/ramdisk.img" ]; then cp "$EXTRACT/ramdisk.img" "${WORK}/stage/android/initrd.img"
+fi
+
+# system.sfs kept intact — init loop-mounts it at boot
+if   [ -f "$EXTRACT/system.sfs" ]; then cp "$EXTRACT/system.sfs" "${WORK}/stage/android/system.sfs"
+elif [ -f "$EXTRACT/system.img" ]; then cp "$EXTRACT/system.img" "${WORK}/stage/android/system.img"
+fi
+
+# vendor: ARM-injected raw img takes priority; else sfs/img as-is
+if   [ -f "${WORK}/vendor.img"     ]; then cp "${WORK}/vendor.img"     "${WORK}/stage/android/vendor.img"
+elif [ -f "$EXTRACT/vendor.sfs"    ]; then cp "$EXTRACT/vendor.sfs"    "${WORK}/stage/android/vendor.sfs"
+elif [ -f "$EXTRACT/vendor.img"    ]; then cp "$EXTRACT/vendor.img"    "${WORK}/stage/android/vendor.img"
+fi
+
+# product
+if   [ -f "$EXTRACT/product.sfs" ]; then cp "$EXTRACT/product.sfs" "${WORK}/stage/android/product.sfs"
+elif [ -f "$EXTRACT/product.img" ]; then cp "$EXTRACT/product.img" "${WORK}/stage/android/product.img"
+fi
+
+log "Staged: $(ls "${WORK}/stage/android" | tr '\n' ' ')"
+
+# ── Assemble bootable disk (GPT: ext4 Data p1 with android/ + ext4 Userdata p2) ──
 log "Assembling bootable disk image..."
-SYSTEM_SZ=$( stat -c%s "${WORK}/system.raw")
-VENDOR_SZ=$([ -f "${WORK}/vendor.raw"  ] && stat -c%s "${WORK}/vendor.raw"  || echo 0)
-PRODUCT_SZ=$([ -f "${WORK}/product.raw"] && stat -c%s "${WORK}/product.raw" || echo 0)
-DATA_CONTENT=$(( SYSTEM_SZ + VENDOR_SZ + PRODUCT_SZ ))
-DATA_SZ=$(( DATA_CONTENT * 12 / 10 + 256 * 1024 * 1024 ))
-USERDATA_SZ=$(( 8 * 1024 * 1024 * 1024 ))   # 8 GiB userdata partition (sda2)
-DISK_SZ=$(( DATA_SZ + 4 * 1024 * 1024 + USERDATA_SZ ))
-log "Disk size: $(( DISK_SZ / 1024 / 1024 )) MB  (data $(( DATA_SZ / 1024 / 1024 )) MB + 8192 MB userdata)"
+STAGE_BYTES=$(du -sb "${WORK}/stage/android" | awk '{print $1}')
+DATA_MIB=$(( (STAGE_BYTES / 1024 / 1024) * 12 / 10 + 256 ))
+USERDATA_MIB=8192
+DATA_END_MIB=$(( 1 + DATA_MIB ))
+DISK_MIB=$(( DATA_END_MIB + USERDATA_MIB + 4 ))
 
-# Compute where the data partition ends (MiB, rounded up) for the second partition boundary
-DATA_END_MIB=$(( 1 + (DATA_SZ + 1048575) / 1048576 ))
-
-truncate -s $DISK_SZ "${WORK}/disk.raw"
+log "Disk: ${DISK_MIB} MiB  (data ${DATA_MIB} MiB + ${USERDATA_MIB} MiB userdata)"
+truncate -s "${DISK_MIB}M" "${WORK}/disk.raw"
 sudo parted -s "${WORK}/disk.raw" \
   mklabel gpt \
-  mkpart Data     ext4  1MiB               ${DATA_END_MIB}MiB \
-  mkpart Userdata ext4  ${DATA_END_MIB}MiB 100%
+  mkpart Data     ext4  1MiB               "${DATA_END_MIB}MiB" \
+  mkpart Userdata ext4  "${DATA_END_MIB}MiB" 100%
 
 LOOP_DEV=$(sudo losetup --find --show --partscan "${WORK}/disk.raw")
 log "Loop device: ${LOOP_DEV}"
 sleep 1
 
-sudo mkfs.ext4 -L BlissOS    "${LOOP_DEV}p1"
-sudo mkfs.ext4 -L Userdata   "${LOOP_DEV}p2"
+sudo mkfs.ext4 -L BlissOS  "${LOOP_DEV}p1"
+sudo mkfs.ext4 -L Userdata "${LOOP_DEV}p2"
 
 mkdir -p "${WORK}/mnt/android"
 sudo mount "${LOOP_DEV}p1" "${WORK}/mnt/android"
-
-sudo cp "${WORK}/system.raw" "${WORK}/mnt/android/system.img"
-[ -f "${WORK}/vendor.raw"  ] && sudo cp "${WORK}/vendor.raw"  "${WORK}/mnt/android/vendor.img"  || true
-[ -f "${WORK}/product.raw" ] && sudo cp "${WORK}/product.raw" "${WORK}/mnt/android/product.img" || true
-
+sudo cp -a "${WORK}/stage/android" "${WORK}/mnt/android/"
 sudo umount "${WORK}/mnt/android"
 sudo rmdir  "${WORK}/mnt/android"
 sudo losetup -d "$LOOP_DEV"
@@ -370,11 +312,8 @@ LOOP_DEV=""
 
 # ── Convert raw disk to qcow2 ─────────────────────────────────────────────────
 log "Converting disk.raw → ${BASE_IMAGE} (qcow2, compressed)..."
-qemu-img convert -O qcow2 -c \
-  "${WORK}/disk.raw" \
-  "$OUT_IMG"
+qemu-img convert -O qcow2 -c "${WORK}/disk.raw" "$OUT_IMG"
 qemu-img info "$OUT_IMG"
-
 log "Recording checksum..."
 sha256sum "$OUT_IMG" >> "${ROOT}/checksums.sha256"
 
@@ -386,70 +325,65 @@ SIDECAR_KERNEL="${ROOT}/intermediate/${BASE_NAME}-kernel"
 SIDECAR_INITRD="${ROOT}/intermediate/${BASE_NAME}-initrd.img"
 SIDECAR_CMDLINE="${ROOT}/intermediate/${BASE_NAME}-cmdline"
 
-if [ -f "${WORK}/boot-kernel" ]; then
-  cp "${WORK}/boot-kernel" "$SIDECAR_KERNEL"
-  log "Kernel sidecar: ${SIDECAR_KERNEL} ($(du -sh "$SIDECAR_KERNEL" | cut -f1))"
-else
-  die "No kernel found in ISO — cannot create sidecar (expected 'kernel' at ISO root)"
-fi
+[ -f "$EXTRACT/kernel" ]     || die "kernel not found in extracted ISO"
+cp "$EXTRACT/kernel" "$SIDECAR_KERNEL"
+log "Kernel sidecar: ${SIDECAR_KERNEL} ($(du -sh "$SIDECAR_KERNEL" | cut -f1))"
 
-if [ -f "${WORK}/boot-initrd.img" ]; then
-  cp "${WORK}/boot-initrd.img" "$SIDECAR_INITRD"
-elif [ -f "${WORK}/boot-ramdisk.img" ]; then
-  cp "${WORK}/boot-ramdisk.img" "$SIDECAR_INITRD"
-else
-  die "No initrd found in ISO — cannot create sidecar (expected initrd.img or ramdisk.img)"
+if   [ -f "$EXTRACT/initrd.img"  ]; then cp "$EXTRACT/initrd.img"  "$SIDECAR_INITRD"
+elif [ -f "$EXTRACT/ramdisk.img" ]; then cp "$EXTRACT/ramdisk.img" "$SIDECAR_INITRD"
+else die "No initrd.img or ramdisk.img found in ISO"
 fi
 log "Initrd sidecar: ${SIDECAR_INITRD} ($(du -sh "$SIDECAR_INITRD" | cut -f1))"
 
-ISO_ANDROID_CFG="${WORK}/boot-efi/EFI/BOOT/android.cfg"
-_ISO_GRUB_CFG=""
-[ -f "${WORK}/boot-efi/EFI/BOOT/grub.cfg" ] && _ISO_GRUB_CFG="${WORK}/boot-efi/EFI/BOOT/grub.cfg"
-[ -z "$_ISO_GRUB_CFG" ] && [ -f "${WORK}/boot-grub/grub.cfg" ] && _ISO_GRUB_CFG="${WORK}/boot-grub/grub.cfg"
-
-# ISOLINUX config (BlissOS 14 and many Android-x86 ISOs use ISOLINUX rather
-# than GRUB — boot params live in an APPEND line, not a 'linux' line).
-_ISO_ISOLINUX_CFG=""
-for _icfg in "${WORK}/boot-isolinux/isolinux.cfg" \
-             "${WORK}/boot-isolinux/android.cfg" \
-             "${WORK}/boot-isolinux/default.cfg"; do
-  [ -f "$_icfg" ] && { _ISO_ISOLINUX_CFG="$_icfg"; break; }
-done
-
+# ── Extract ISO base cmdline (awk GRUB + ISOLINUX fallback) ──────────────────
 _linux_line=""
-# Prefer GRUB/EFI configs first (BlissOS 15 style)
-for _cfg in "$ISO_ANDROID_CFG" ${_ISO_GRUB_CFG:+"$_ISO_GRUB_CFG"}; do
+# GRUB menuentry style (BlissOS 15 / android.cfg)
+for _cfg in "$EXTRACT/_cfg/android.cfg" "$EXTRACT/_cfg/grub.cfg" \
+            "$EXTRACT/_cfg/"*.cfg; do
   [ -f "$_cfg" ] || continue
-  _line=$(grep -m1 -E '^\s*linux\s' "$_cfg" 2>/dev/null || true)
-  if [ -n "$_line" ]; then _linux_line="$_line"; break; fi
+  _line=$(awk '
+    /^[[:space:]]*menuentry/ { in_entry=1; next }
+    in_entry && /^[[:space:]]*linux[[:space:]]/ {
+      sub(/^[[:space:]]*linux[[:space:]]+[^[:space:]]+[[:space:]]*/,""); print; exit
+    }' "$_cfg" 2>/dev/null || true)
+  [ -n "$_line" ] && { _linux_line="$_line"; break; }
 done
-# Fall back to ISOLINUX APPEND syntax (BlissOS 14 / Android-x86 style)
-if [ -z "$_linux_line" ] && [ -n "$_ISO_ISOLINUX_CFG" ]; then
-  _append_line=$(grep -m1 -iE '^\s*APPEND\s' "$_ISO_ISOLINUX_CFG" 2>/dev/null || true)
-  if [ -n "$_append_line" ]; then
-    # Reformat as a fake 'linux /kernel <params>' so the strip below works
-    _linux_line="linux /kernel $(echo "$_append_line" | sed -E 's/^\s*APPEND\s+//')"
-  fi
+# ISOLINUX APPEND fallback (BlissOS 14 / Android-x86)
+if [ -z "$_linux_line" ]; then
+  for _icfg in "$EXTRACT/_cfg/isolinux.cfg" "$EXTRACT/_cfg/android.cfg" \
+               "$EXTRACT/_cfg/default.cfg"; do
+    [ -f "$_icfg" ] || continue
+    _al=$(grep -m1 -iE '^\s*APPEND\s' "$_icfg" 2>/dev/null || true)
+    if [ -n "$_al" ]; then
+      _linux_line="linux /kernel $(echo "$_al" | sed -E 's/^\s*APPEND\s+//')"
+      break
+    fi
+  done
 fi
 
 if [ -n "$_linux_line" ]; then
-  echo "$_linux_line" \
+  _base_params=$(echo "$_linux_line" \
     | sed -E 's/^\s*linux\s+\S+\s*//' \
     | tr ' ' '\n' \
-    | grep -vE '^(root=|SRC=|DATA=|BOOT_IMAGE=|console=|quiet$|nomodeset$|androidboot\.enable_console=)' \
+    | grep -vE '^(root=|SRC=|DATA=|BOOT_IMAGE=|iso-scan|console=|quiet$|nomodeset$|androidboot\.enable_console=|HWC=|GRALLOC=)' \
     | grep -v '^$' \
     | tr '\n' ' ' \
-    | sed 's/[[:space:]]*$//' \
-    > "$SIDECAR_CMDLINE"
-  log "Cmdline sidecar: $(cat "$SIDECAR_CMDLINE")"
+    | sed 's/[[:space:]]*$//')
 else
-  warn "No 'linux'/'APPEND' line found in ISO config — using default cmdline"
-  echo "androidboot.hardware=android_x86_64 androidboot.selinux=permissive" > "$SIDECAR_CMDLINE"
+  warn "No linux/APPEND line found in ISO config — using fallback cmdline"
+  _base_params="androidboot.hardware=android_x86_64 androidboot.selinux=permissive"
 fi
+
+# Append our fixed SRC and HWC (safe default for any QEMU version)
+printf '%s SRC=android HWC=swiftshader\n' "$_base_params" \
+  | sed 's/[[:space:]]\+/ /g; s/ *$//' \
+  > "$SIDECAR_CMDLINE"
+log "Cmdline sidecar: $(cat "$SIDECAR_CMDLINE")"
 
 # ── Tidy work directory ───────────────────────────────────────────────────────
 log "Removing work files..."
-rm -rf "${WORK}/disk.raw" "${WORK}/"*.raw "${WORK}/boot-"* 2>/dev/null || true
+rm -rf "${WORK}/disk.raw" "${WORK}/"*.raw "${WORK}/stage" "${WORK}/iso-extract" \
+  "${WORK}/vendor.img" 2>/dev/null || true
 
 trap - EXIT
 
