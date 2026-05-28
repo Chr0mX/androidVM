@@ -4,9 +4,8 @@
   "cpu_cores": 6,
   "cpu_threads": 2,
   "hugepages": true,
-  "gpu": "virtio-vga",
-  "secondary_gpu": "virtio-gpu-pci,max_outputs=0",
-  "display": "gtk,gl=off",
+  "gpu": "virtio-vga-gl",
+  "display": "gtk,gl=on,show-cursor=on",
   "audio": "pa",
   "multithreaded_render": true
 }

@@ -122,7 +122,10 @@ fi
 # ── GPU flags ─────────────────────────────────────────────────────────────────
 GPU_FLAGS=()
 case "$GPU" in
-  virtio-vga-gl|virtio-vga)
+  virtio-vga-gl)
+    GPU_FLAGS=(-vga none -device "${GPU},xres=1920,yres=1080")
+    ;;
+  virtio-vga)
     GPU_FLAGS=(-device "${GPU},xres=1920,yres=1080")
     ;;
   VGA)
