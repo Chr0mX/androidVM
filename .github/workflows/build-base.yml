@@ -90,8 +90,8 @@ jobs:
             local base_image inject_gapps source_url source_filename cache_key source_type gapps_url
 
             base_image=$(  jq -r '.base_image'            "$cfg")
-            inject_gapps=$(    jq -r 'if .inject_gapps     == false then "false" else "true" end' "$cfg")
-            inject_arm_trans=$(jq -r 'if .inject_arm_trans == false then "false" else "true" end' "$cfg")
+            inject_gapps=$(    jq -r 'if .inject_gapps     == true then "true" else "false" end' "$cfg")
+            inject_arm_trans=$(jq -r 'if .inject_arm_trans == true then "true" else "false" end' "$cfg")
             source_type=$(     jq -r '.source.type'           "$cfg")
             source_url=$(  jq -r '.source.url      // ""' "$cfg")
             source_filename=$(jq -r '.source.filename // ""' "$cfg")
