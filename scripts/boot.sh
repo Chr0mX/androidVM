@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
-# Boot a profile image in QEMU/KVM with GRUB EFI firmware.
+# Boot an instance (or legacy profile build) in QEMU/KVM with GRUB EFI firmware.
 #
-# Usage: boot.sh <profile-name> [OPTIONS]
+# Usage: boot.sh <instance-name> [OPTIONS]
 #
-#   --vm-profile <name>   VM hardware profile (default: from config/defaults.json)
+# If <instance-name> matches instances/<name>.json, all VM hardware / ports /
+# disk path come from that file. Otherwise we fall back to the legacy layout
+# (builds/android11-<name>-latest.qcow2 + config/defaults.json ADB port).
+#
+#   --vm-profile <name>   VM hardware profile override (legacy mode only;
+#                         instance mode reads it from the instance file)
 #   --no-kvm              Force TCG emulation (no KVM)
 #   --headless            No display window
-#   --spice               Headless + SPICE remote display on port 5900
-#   --vnc [display]       Headless + VNC on given display number (default: 0 → port 5900)
+#   --spice               Headless + SPICE remote display
+#   --vnc [display]       Headless + VNC on given display number (offset from
+#                         the instance's spice_port base; default 0)
 #   --snapshot            Ephemeral mode — changes to main image not persisted
 set -euo pipefail
 
@@ -16,7 +22,7 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 die() { echo "[boot] ERROR: $*" >&2; exit 1; }
 
-PROFILE_NAME="${1:?Usage: boot.sh <profile-name> [--vm-profile <name>] [--no-kvm] [--headless] [--spice] [--vnc [display]] [--snapshot]}"
+INSTANCE_NAME="${1:?Usage: boot.sh <instance-name> [--vm-profile <name>] [--no-kvm] [--headless] [--spice] [--vnc [display]] [--snapshot]}"
 shift || true
 
 VM_PROFILE_NAME=""
@@ -46,17 +52,47 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Source hardware detection helpers
+# Source helpers
 # shellcheck source=lib/detect-hardware.sh
 . "${SCRIPT_DIR}/lib/detect-hardware.sh"
+# shellcheck source=lib/instance.sh
+. "${SCRIPT_DIR}/lib/instance.sh"
 
-# ── Resolve VM hardware profile ────────────────────────────────────────────────
 DEFAULTS_JSON="${ROOT}/config/defaults.json"
-if [ -z "$VM_PROFILE_NAME" ]; then
-  VM_PROFILE_NAME=$(jq -r '.default_vm_profile // "balanced"' \
-    "$DEFAULTS_JSON" 2>/dev/null || echo "balanced")
+
+# ── Resolve instance vs legacy mode ───────────────────────────────────────────
+INSTANCE_MODE=false
+ADB_PORT=""
+SPICE_PORT=""
+IMG=""
+PID_FILE=""
+SERIAL_LOG=""
+QMP_SOCK=""
+
+if instance_exists "$INSTANCE_NAME"; then
+  INSTANCE_MODE=true
+  CFG="$(instance_path "$INSTANCE_NAME")"
+  ADB_PORT=$(jq -r '.adb_port'   "$CFG")
+  SPICE_PORT=$(jq -r '.spice_port' "$CFG")
+  [ -z "$VM_PROFILE_NAME" ] && VM_PROFILE_NAME=$(jq -r '.vm_profile' "$CFG")
+  IMG=$(instance_disk "$INSTANCE_NAME")
+  PID_FILE=$(instance_pid_file  "$INSTANCE_NAME")
+  SERIAL_LOG=$(instance_serial_log "$INSTANCE_NAME")
+  QMP_SOCK=$(instance_qmp_sock  "$INSTANCE_NAME")
+else
+  # Legacy fallback: builds/android11-<name>-latest.qcow2
+  IMG="${ROOT}/builds/android11-${INSTANCE_NAME}-latest.qcow2"
+  PID_FILE="${ROOT}/run/${INSTANCE_NAME}.pid"
+  SERIAL_LOG="${ROOT}/logs/${INSTANCE_NAME}-serial.log"
+  QMP_SOCK=""
+  ADB_PORT=$(jq -r '.adb_port // 5555' "$DEFAULTS_JSON" 2>/dev/null || echo "5555")
+  SPICE_PORT=5900
+  [ -z "$VM_PROFILE_NAME" ] && VM_PROFILE_NAME=$(jq -r '.default_vm_profile // "balanced"' "$DEFAULTS_JSON" 2>/dev/null || echo "balanced")
 fi
 
+[ -f "$IMG" ] || die "Image not found: $IMG"
+
+# ── Resolve VM hardware profile ───────────────────────────────────────────────
 VM_PROFILE_FILE="${ROOT}/config/vm-profiles/${VM_PROFILE_NAME}.json"
 if [ ! -f "$VM_PROFILE_FILE" ]; then
   echo "[boot] ERROR: VM profile not found: ${VM_PROFILE_FILE}" >&2
@@ -89,10 +125,6 @@ if [ "$CPU_CORES" -gt "$MAX_VM_CORES" ]; then
   echo "[boot] WARNING: Profile requests ${CPU_CORES} cores but host suggests max ${MAX_VM_CORES} — capping"
   CPU_CORES="$MAX_VM_CORES"
 fi
-
-# ── Image path ─────────────────────────────────────────────────────────────────
-IMG="${ROOT}/builds/android11-${PROFILE_NAME}-latest.qcow2"
-[ -f "$IMG" ] || { echo "[boot] ERROR: Image not found: $IMG" >&2; exit 1; }
 
 # ── OVMF/UEFI firmware ────────────────────────────────────────────────────────
 OVMF_PATH=""
@@ -144,7 +176,7 @@ DISPLAY_FLAGS=()
 if $SPICE_MODE; then
   DISPLAY_FLAGS=(
     -display none
-    -spice "port=5900,disable-ticketing=on"
+    -spice "port=${SPICE_PORT},disable-ticketing=on"
     -vga none
     -device virtio-serial
     -chardev "spicevmc,id=vdagent,name=vdagent"
@@ -152,10 +184,11 @@ if $SPICE_MODE; then
   )
   GPU_FLAGS=()
 elif $VNC_MODE; then
-  VNC_PORT=$(( 5900 + VNC_DISPLAY ))
+  VNC_PORT=$(( SPICE_PORT + VNC_DISPLAY ))
+  VNC_DISP_NUM=$(( VNC_PORT - 5900 ))
   GPU_FLAGS=(-device "virtio-vga,xres=1920,yres=1080")
-  DISPLAY_FLAGS=(-display none -vnc ":${VNC_DISPLAY}")
-  echo "[boot] VNC:         vnc://localhost:${VNC_PORT}  (display :${VNC_DISPLAY})"
+  DISPLAY_FLAGS=(-display none -vnc ":${VNC_DISP_NUM}")
+  echo "[boot] VNC:         vnc://localhost:${VNC_PORT}  (display :${VNC_DISP_NUM})"
 elif $HEADLESS; then
   DISPLAY_FLAGS=(-display none)
 else
@@ -163,13 +196,19 @@ else
 fi
 
 # ── Serial / monitor flags ────────────────────────────────────────────────────
-mkdir -p "${ROOT}/logs"
+mkdir -p "${ROOT}/logs" "${ROOT}/run"
 if $VNC_MODE || $SPICE_MODE; then
-  SERIAL_LOG="${ROOT}/logs/${PROFILE_NAME}-serial.log"
   SERIAL_FLAGS=(-serial "file:${SERIAL_LOG}")
   echo "[boot] Serial log: ${SERIAL_LOG}"
 else
   SERIAL_FLAGS=(-serial mon:stdio)
+fi
+
+# ── QMP socket (instance mode only) ───────────────────────────────────────────
+QMP_FLAGS=()
+if [ -n "$QMP_SOCK" ]; then
+  rm -f "$QMP_SOCK"
+  QMP_FLAGS=(-qmp "unix:${QMP_SOCK},server=on,wait=off")
 fi
 
 # ── Audio flags ───────────────────────────────────────────────────────────────
@@ -206,19 +245,13 @@ fi
 IMG_SNAPSHOT="snapshot=off"
 $SNAPSHOT && IMG_SNAPSHOT="snapshot=on"
 
-# ── PID tracking ──────────────────────────────────────────────────────────────
-RUN_DIR="${ROOT}/run"
-mkdir -p "$RUN_DIR"
-PID_FILE="${RUN_DIR}/${PROFILE_NAME}.pid"
-
-ADB_PORT=$(jq -r '.adb_port // 5555' "$DEFAULTS_JSON" 2>/dev/null || echo "5555")
-
-echo "[boot] Starting VM: profile=${PROFILE_NAME}  vm-profile=${VM_PROFILE_NAME}"
+echo "[boot] Starting VM: instance=${INSTANCE_NAME}  vm-profile=${VM_PROFILE_NAME}"
 echo "[boot] Resources:   ${CPU_CORES}c/${CPU_THREADS}t  ${RAM_MB}MB RAM"
 echo "[boot] Image:       ${IMG}"
 echo "[boot] OVMF:        ${OVMF_PATH}"
 echo "[boot] ADB:         adb connect localhost:${ADB_PORT}"
-$SPICE_MODE && echo "[boot] SPICE:        spice://localhost:5900"
+$SPICE_MODE && echo "[boot] SPICE:        spice://localhost:${SPICE_PORT}"
+[ -n "$QMP_SOCK" ] && echo "[boot] QMP:         ${QMP_SOCK}"
 
 qemu-system-x86_64 \
   "${KVM_FLAGS[@]}" \
@@ -241,17 +274,18 @@ qemu-system-x86_64 \
   -device virtio-net-pci,netdev=net0 \
   -netdev "user,id=net0,hostfwd=tcp::${ADB_PORT}-:5555" \
   -device virtio-rng-pci \
+  "${QMP_FLAGS[@]}" \
   "${SERIAL_FLAGS[@]}" &
 
 QEMU_PID=$!
 echo "$QEMU_PID" > "$PID_FILE"
 
 if $VNC_MODE || $SPICE_MODE || $HEADLESS; then
-  ( wait "$QEMU_PID" 2>/dev/null; rm -f "$PID_FILE" ) &
+  ( wait "$QEMU_PID" 2>/dev/null; rm -f "$PID_FILE" "$QMP_SOCK" ) &
   disown
   echo "[boot] VM running in background (PID ${QEMU_PID})"
-  echo "[boot] Stop with: android-vm stop ${PROFILE_NAME}"
+  echo "[boot] Stop with: android-vm stop ${INSTANCE_NAME}"
 else
   wait "$QEMU_PID" || true
-  rm -f "$PID_FILE"
+  rm -f "$PID_FILE" "$QMP_SOCK"
 fi

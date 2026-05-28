@@ -1,0 +1,4 @@
+# Track only the .gitkeep stub; instance configs/disks are local state.
+*
+!.gitkeep
+!.gitignore

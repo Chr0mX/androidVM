@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Instances — android-vm{% endblock %}
+{% block content %}
+  <h2>Instances</h2>
+  {% if not instances %}
+    <div class="empty">
+      <p>No instances yet.</p>
+      <p><a href="{{ url_for('create_instance') }}" class="button primary">Create your first instance</a></p>
+    </div>
+  {% else %}
+  <table class="instances">
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>State</th>
+        <th>Distro / VM</th>
+        <th>ADB</th>
+        <th>SPICE</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for inst in instances %}
+      <tr>
+        <td><a href="{{ url_for('instance_detail', name=inst.name) }}">{{ inst.name }}</a></td>
+        <td>
+          <span class="state state-{{ inst.state }}">{{ inst.state }}</span>
+        </td>
+        <td>
+          <span class="tag">{{ inst.distro }}</span>
+          <span class="tag muted">{{ inst.vm_profile }}</span>
+        </td>
+        <td><code>localhost:{{ inst.adb_port }}</code></td>
+        <td><code>{{ inst.spice_port }}</code></td>
+        <td class="actions">
+          {% if inst.state == "running" %}
+            <form method="post" action="{{ url_for('instance_action', name=inst.name, action='stop') }}" class="inline">
+              <button type="submit">Stop</button>
+            </form>
+            <form method="post" action="{{ url_for('instance_action', name=inst.name, action='restart') }}" class="inline">
+              <button type="submit">Restart</button>
+            </form>
+          {% else %}
+            <form method="post" action="{{ url_for('instance_action', name=inst.name, action='start') }}" class="inline">
+              <button type="submit" class="primary">Start</button>
+            </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  <script>
+    // Auto-refresh table every 3s without losing scroll position.
+    if (document.querySelector("table.instances")) {
+      setTimeout(function () { window.location.reload(); }, 3000);
+    }
+  </script>
+{% endblock %}

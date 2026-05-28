@@ -200,8 +200,8 @@ install_apt() {
     sudo apt-get install -y --no-install-recommends simg2img img2simg 2>/dev/null \
       || warn "simg2img not available — sparse image conversion may not work"
   fi
-  pip3 install jsonschema --quiet --break-system-packages 2>/dev/null \
-    || pip3 install jsonschema --quiet
+  pip3 install jsonschema flask --quiet --break-system-packages 2>/dev/null \
+    || pip3 install jsonschema flask --quiet
 }
 
 install_dnf() {
@@ -212,7 +212,7 @@ install_dnf() {
     jq curl rsync git wget \
     p7zip \
     bridge-utils lzip squashfs-tools parted unzip tar
-  pip3 install jsonschema --quiet
+  pip3 install jsonschema flask --quiet
 }
 
 install_pacman() {
@@ -222,7 +222,7 @@ install_pacman() {
     e2fsprogs python python-pip \
     jq curl rsync git \
     p7zip
-  pip3 install jsonschema --quiet
+  pip3 install jsonschema flask --quiet
 }
 
 case "$PKG_MANAGER" in
@@ -253,9 +253,10 @@ fi
 
 cd "$WORKSPACE_DIR"
 
-mkdir -p intermediate builds profiles scripts/lib arm-trans gapps \
-         logs mnt/{system,vendor,product} run cache \
-         config/vm-profiles
+mkdir -p intermediate builds instances profiles scripts/lib arm-trans gapps \
+         logs mnt run cache \
+         config/vm-profiles \
+         gui/templates gui/static
 ok "Workspace ready at ${WORKSPACE_DIR}"
 
 find scripts/ -name '*.sh' -exec chmod +x {} \;
@@ -434,25 +435,25 @@ Quick reference:
   android-vm stop ${STARTER_PROFILE}
   android-vm reset ${STARTER_PROFILE}
 
+  ${DIM}# Manage multiple instances${NC}
+  android-vm instance create work --profile pixel6a-bp1a --vm-profile balanced --distro bliss14
+  android-vm instance list
+  android-vm instance start work
+
+  ${DIM}# Launch the web GUI${NC}
+  android-vm gui                       # opens http://127.0.0.1:8080
+
   ${DIM}# Diagnose issues${NC}
   android-vm doctor
-
-  ${DIM}# List available profiles${NC}
   android-vm profiles
-
-  ${DIM}# Build a profile image (required before first start)${NC}
-  cd ${WORKSPACE_DIR}
-  bash scripts/set-profile.sh ${STARTER_PROFILE} --rebuild
-
-  ${DIM}# Connect via ADB${NC}
-  adb connect localhost:5555
 
 Workspace layout:
   android-vm     → unified CLI (also at /usr/local/bin/android-vm)
   intermediate/  → per-distro base image (never boot this)
-  builds/        → per-profile bootable images  ← boot these
+  instances/     → per-instance config + disk (boot these)
   profiles/      → JSON device identity profiles
   config/        → defaults.json, device-spoof.json, vm-profiles/
+  gui/           → Flask web UI
   logs/          → build and verify logs
 
 EOF

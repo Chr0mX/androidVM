@@ -1,0 +1,3 @@
+# Per-instance configs and disks live here.
+# Each instance is <name>.json (config) + <name>/disk.qcow2 (qcow2 overlay).
+# Managed by `android-vm instance ...` — do not edit by hand.

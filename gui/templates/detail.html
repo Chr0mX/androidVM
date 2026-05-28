@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}{{ inst.name }} — android-vm{% endblock %}
+{% block content %}
+  <h2>{{ inst.name }}
+    <span class="state state-{{ inst.state }}">{{ inst.state }}</span>
+  </h2>
+
+  <dl class="meta">
+    <dt>Device profile</dt><dd>{{ inst.device_profile }}</dd>
+    <dt>VM profile</dt>    <dd>{{ inst.vm_profile }}</dd>
+    <dt>Distro</dt>        <dd>{{ inst.distro }}</dd>
+    <dt>ADB</dt>           <dd><code>adb connect localhost:{{ inst.adb_port }}</code></dd>
+    <dt>SPICE port</dt>    <dd><code>{{ inst.spice_port }}</code></dd>
+    {% if inst.state == "running" %}<dt>PID</dt><dd><code>{{ inst.pid }}</code></dd>{% endif %}
+    <dt>Created</dt>       <dd>{{ inst.created_at }}</dd>
+  </dl>
+
+  <div class="actions row">
+    {% if inst.state == "running" %}
+      <form method="post" action="{{ url_for('instance_action', name=inst.name, action='stop') }}" class="inline">
+        <button type="submit">Stop</button>
+      </form>
+      <form method="post" action="{{ url_for('instance_action', name=inst.name, action='restart') }}" class="inline">
+        <button type="submit">Restart</button>
+      </form>
+    {% else %}
+      <form method="post" action="{{ url_for('instance_action', name=inst.name, action='start') }}" class="inline">
+        <button type="submit" class="primary">Start</button>
+      </form>
+      <form method="post" action="{{ url_for('instance_action', name=inst.name, action='reset') }}" class="inline"
+            onsubmit="return confirm('Reformat Userdata partition? This wipes app data.');">
+        <button type="submit">Reset userdata</button>
+      </form>
+      <form method="post" action="{{ url_for('instance_action', name=inst.name, action='delete') }}" class="inline"
+            onsubmit="return confirm('Delete this instance and its disk? Cannot be undone.');">
+        <button type="submit" class="danger">Delete</button>
+      </form>
+    {% endif %}
+  </div>
+
+  <h3>Serial log (last 8 KB)</h3>
+  <pre class="log">{{ log_tail or "(no log yet)" }}</pre>
+
+  <script>
+    if ("{{ inst.state }}" === "running") {
+      setTimeout(function () { window.location.reload(); }, 3000);
+    }
+  </script>
+{% endblock %}

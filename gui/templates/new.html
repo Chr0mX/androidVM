@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}New instance — android-vm{% endblock %}
+{% block content %}
+  <h2>New instance</h2>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="post" class="stacked">
+    <label>
+      <span>Name</span>
+      <input name="name" required pattern="[A-Za-z0-9_\-]+" value="{{ form.get('name','') }}"
+             placeholder="e.g. work-pixel6a">
+      <small>letters, digits, _ and - only</small>
+    </label>
+    <label>
+      <span>Device profile <small>(identity)</small></span>
+      <select name="device_profile" required>
+        <option value="">— pick one —</option>
+        {% for p in choices.device_profiles %}
+          <option value="{{ p }}" {% if form.get('device_profile') == p %}selected{% endif %}>{{ p }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>VM hardware profile</span>
+      <select name="vm_profile" required>
+        <option value="">— pick one —</option>
+        {% for p in choices.vm_profiles %}
+          <option value="{{ p }}" {% if form.get('vm_profile') == p %}selected{% endif %}>{{ p }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>Distro</span>
+      <select name="distro" required>
+        <option value="">— pick one —</option>
+        {% for d in choices.distros %}
+          <option value="{{ d }}" {% if form.get('distro') == d %}selected{% endif %}>{{ d }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="buttons">
+      <a href="{{ url_for('index') }}" class="button">Cancel</a>
+      <button type="submit" class="primary">Create</button>
+    </div>
+  </form>
+  <p class="hint">After creating, build the disk on the command line:<br>
+    <code>bash scripts/set-profile.sh &lt;name&gt;</code>
+  </p>
+{% endblock %}

@@ -1,5 +1,7 @@
 {
   "default_device_profile": "generic",
   "default_vm_profile": "balanced",
-  "adb_port": 5555
+  "default_distro": "bliss14",
+  "adb_port": 5555,
+  "gui_port": 8080
 }

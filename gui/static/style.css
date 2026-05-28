@@ -1,0 +1,144 @@
+:root {
+  --bg: #0f1115;
+  --bg2: #151821;
+  --fg: #e6e6e6;
+  --muted: #9aa0a6;
+  --accent: #4f9eff;
+  --danger: #ff5c5c;
+  --ok: #4fd17a;
+  --warn: #f5a623;
+  --border: #262a33;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  line-height: 1.5;
+}
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 2rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+}
+header h1 { margin: 0; font-size: 1.2rem; font-weight: 600; }
+header h1 a { color: var(--fg); text-decoration: none; }
+nav a {
+  color: var(--muted);
+  text-decoration: none;
+  margin-left: 1.5rem;
+  font-size: 0.9rem;
+}
+nav a:hover, nav a.primary { color: var(--accent); }
+main { padding: 2rem; max-width: 1100px; margin: 0 auto; }
+h2 { font-weight: 600; margin-top: 0; display: flex; align-items: center; gap: 1rem; }
+h3 { font-weight: 600; margin-top: 2rem; color: var(--muted); font-size: 0.95rem; }
+a { color: var(--accent); }
+
+table.instances {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--bg2);
+  border-radius: 8px;
+  overflow: hidden;
+}
+table.instances th, table.instances td {
+  padding: 0.75rem 1rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+table.instances th { font-size: 0.8rem; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
+table.instances tr:last-child td { border-bottom: none; }
+td.actions { text-align: right; white-space: nowrap; }
+form.inline { display: inline; margin-left: 0.25rem; }
+.row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
+button, .button {
+  background: #2a2f3a;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.4rem 0.85rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+  text-decoration: none;
+  display: inline-block;
+}
+button:hover, .button:hover { background: #353b48; }
+button.primary, .button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+button.primary:hover, .button.primary:hover { background: #6cb0ff; }
+button.danger, .button.danger { background: var(--danger); border-color: var(--danger); color: white; }
+
+.state {
+  display: inline-block;
+  padding: 0.15rem 0.55rem;
+  border-radius: 99px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.state-running { background: rgba(79,209,122,0.15); color: var(--ok); }
+.state-stopped { background: rgba(154,160,166,0.15); color: var(--muted); }
+
+.tag {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 4px;
+  background: rgba(79,158,255,0.15);
+  color: var(--accent);
+  font-size: 0.8rem;
+  margin-right: 0.25rem;
+}
+.tag.muted { background: rgba(154,160,166,0.15); color: var(--muted); }
+code {
+  background: rgba(255,255,255,0.05);
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+}
+pre.log {
+  background: #0b0d12;
+  padding: 1rem;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 0.8rem;
+  max-height: 400px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+}
+
+form.stacked { display: flex; flex-direction: column; gap: 1rem; max-width: 480px; }
+form.stacked label { display: flex; flex-direction: column; gap: 0.3rem; }
+form.stacked label > span { font-weight: 500; }
+form.stacked label small { color: var(--muted); font-size: 0.8rem; font-weight: normal; }
+form.stacked input, form.stacked select {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 0.55rem 0.7rem;
+  border-radius: 6px;
+  font-size: 0.95rem;
+}
+form.stacked input:focus, form.stacked select:focus { outline: none; border-color: var(--accent); }
+form.stacked .buttons { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 0.5rem; }
+
+dl.meta { display: grid; grid-template-columns: max-content 1fr; gap: 0.35rem 1.5rem; margin: 1rem 0 2rem; }
+dl.meta dt { color: var(--muted); font-size: 0.85rem; }
+dl.meta dd { margin: 0; }
+
+.error {
+  background: rgba(255,92,92,0.1);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  padding: 0.6rem 1rem;
+  border-radius: 6px;
+  margin-bottom: 1rem;
+}
+.empty { text-align: center; padding: 3rem 1rem; color: var(--muted); }
+.hint { color: var(--muted); margin-top: 1.5rem; font-size: 0.9rem; }
