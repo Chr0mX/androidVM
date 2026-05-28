@@ -311,14 +311,14 @@ terminal_output serial console
 
 menuentry "BlissOS / Sakura" --class android {
     search --set=root --file /android/kernel
-    linux /android/kernel ${_cmdline}
-    initrd /android/initrd.img
+    linuxefi /android/kernel ${_cmdline}
+    initrdefi /android/initrd.img
 }
 
 menuentry "BlissOS / Sakura (debug)" --class android {
     search --set=root --file /android/kernel
-    linux /android/kernel ${_cmdline} DEBUG=2 console=ttyS0,115200n8 androidboot.enable_console=1
-    initrd /android/initrd.img
+    linuxefi /android/kernel ${_cmdline} DEBUG=2 console=ttyS0,115200n8 androidboot.enable_console=1
+    initrdefi /android/initrd.img
 }
 GRUBEOF
 log "grub.cfg written (cmdline: ${_cmdline})"
@@ -334,7 +334,7 @@ grub-mkstandalone \
     --format=x86_64-efi \
     --output="${WORK}/BOOTX64.EFI" \
     --locales="" --fonts="" \
-    --modules="part_gpt fat ext2 search search_label configfile linux normal echo serial terminal" \
+    --modules="part_gpt fat ext2 search search_label configfile linux linuxefi normal echo serial terminal" \
     "boot/grub/grub.cfg=${WORK}/grub-stub.cfg"
 log "GRUB EFI binary: ${WORK}/BOOTX64.EFI ($(du -sh "${WORK}/BOOTX64.EFI" | cut -f1))"
 
