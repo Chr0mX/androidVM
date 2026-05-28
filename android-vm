@@ -153,6 +153,9 @@ SUBCOMMANDS
   instance stop <name>
   instance restart <name>
   instance reset <name>
+  instance expand <name> <size> [--apply]
+      Grow the Userdata partition (sda3). <size> is +<n>{M,G} (delta) or
+      <n>{M,G} (absolute). Dry-run by default — pass --apply to perform.
   instance delete <name>
   instance show <name>
 
@@ -298,6 +301,110 @@ cmd_reset() {
   release_nbd "$nbd"
   [ "$mkfs_rc" -eq 0 ] || die "mkfs.ext4 failed (exit ${mkfs_rc}) — userdata not reset"
   ok "Userdata reset for '${name}' (sda3 reformatted as ext4)"
+}
+
+# ── cmd_expand ────────────────────────────────────────────────────────────────
+#
+# Resolve a size argument against a current byte size.
+#   +<n>{M,G}  → cur + n*unit
+#   <n>{M,G}   → n*unit  (absolute)
+# Echoes the resolved size in bytes.
+resolve_size() {
+  local cur="$1" arg="$2"
+  local rel=false
+  if [[ "$arg" == +* ]]; then rel=true; arg="${arg#+}"; fi
+  local num="${arg%[MmGg]}" suf="${arg: -1}" unit
+  case "$suf" in
+    M|m) unit=$((1024*1024)) ;;
+    G|g) unit=$((1024*1024*1024)) ;;
+    *)   echo "resolve_size: bad unit in '$arg' (use M or G)" >&2; return 1 ;;
+  esac
+  [[ "$num" =~ ^[0-9]+$ ]] || { echo "resolve_size: bad number in '$arg'" >&2; return 1; }
+  local bytes=$(( num * unit ))
+  if $rel; then bytes=$(( cur + bytes )); fi
+  echo "$bytes"
+}
+
+# Format bytes as a human-readable size for logs.
+human_size() {
+  local b="$1"
+  awk -v b="$b" 'BEGIN {
+    if (b >= 1073741824) printf "%.1f GiB", b/1073741824;
+    else if (b >= 1048576) printf "%.1f MiB", b/1048576;
+    else printf "%d B", b;
+  }'
+}
+
+cmd_expand() {
+  local name="" size_arg="" apply=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --apply) apply=true; shift ;;
+      --debug) shift ;;
+      -*) die "Unknown flag for expand: $1" ;;
+      *)
+        if   [ -z "$name" ];     then name="$1"
+        elif [ -z "$size_arg" ]; then size_arg="$1"
+        else die "Unexpected argument: $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+  [ -n "$name" ]     || die "Usage: android-vm instance expand <name> <size> [--apply]"
+  [ -n "$size_arg" ] || die "Size required (e.g. +4G, 16G, 8192M)"
+
+  migrate_legacy_builds
+  instance_exists "$name" || die "No such instance: ${name}"
+  if instance_running "$name"; then
+    die "Instance '${name}' is running — stop it first: android-vm stop ${name}"
+  fi
+
+  local img cur_bytes new_bytes
+  img=$(instance_disk "$name")
+  [ -f "$img" ] || die "No disk for '${name}': ${img}"
+
+  cur_bytes=$(qemu-img info --output=json "$img" | jq -r '."virtual-size"')
+  new_bytes=$(resolve_size "$cur_bytes" "$size_arg") || die "Bad size: $size_arg"
+
+  if [ "$new_bytes" -le "$cur_bytes" ]; then
+    die "Refusing to shrink: current $(human_size "$cur_bytes") → requested $(human_size "$new_bytes") (would lose data)"
+  fi
+
+  local delta=$(( new_bytes - cur_bytes ))
+  log "Plan: $(human_size "$cur_bytes") → $(human_size "$new_bytes") (+$(human_size "$delta") added to Userdata)"
+
+  if ! $apply; then
+    log "Dry-run only. Re-run with --apply to perform the expansion."
+    return 0
+  fi
+
+  log "Resizing qcow2 ..."
+  qemu-img resize "$img" "$new_bytes"
+
+  local nbd
+  nbd=$(alloc_nbd) || die "Could not allocate NBD device"
+  log "Using ${nbd}"
+  sudo qemu-nbd --connect="$nbd" "$img"
+  sleep 1
+
+  local fail=0
+  log "Fixing GPT and growing p3 (Userdata) to fill new space ..."
+  sudo parted -s "$nbd" --fix -- resizepart 3 100% || fail=$?
+  if [ "$fail" -eq 0 ]; then
+    sudo partprobe "$nbd" 2>/dev/null || true
+    sleep 1
+    log "fsck p3 ..."
+    sudo e2fsck -fy "${nbd}p3" || fail=$?
+  fi
+  if [ "$fail" -eq 0 ]; then
+    log "resize2fs p3 ..."
+    sudo resize2fs "${nbd}p3" || fail=$?
+  fi
+  release_nbd "$nbd"
+
+  [ "$fail" -eq 0 ] || die "Expansion failed (exit ${fail}) — qcow2 was resized but partition/fs may need manual repair"
+  ok "Expanded '${name}' to $(human_size "$new_bytes") (Userdata grew by $(human_size "$delta"))"
 }
 
 # ── cmd_update ────────────────────────────────────────────────────────────────
@@ -625,7 +732,8 @@ cmd_instance() {
     stop)    cmd_stop     "$@" ;;
     restart) inst_restart "$@" ;;
     reset)   cmd_reset    "$@" ;;
-    *) die "Unknown instance subcommand: '${sub}'. Try: list, create, start, stop, restart, reset, delete, show" ;;
+    expand)  cmd_expand   "$@" ;;
+    *) die "Unknown instance subcommand: '${sub}'. Try: list, create, start, stop, restart, reset, expand, delete, show" ;;
   esac
 }
 

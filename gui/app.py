@@ -116,8 +116,18 @@ def instance_detail(name):
 
 @app.route("/instances/<name>/<action>", methods=["POST"])
 def instance_action(name, action):
-    if action not in {"start", "stop", "restart", "reset", "delete"}:
+    if action not in {"start", "stop", "restart", "reset", "delete", "expand"}:
         return jsonify({"error": "invalid action"}), 400
+
+    if action == "expand":
+        size = request.form.get("size", "").strip()
+        if not size:
+            return "<pre>size is required</pre>", 400
+        r = run_cli("instance", "expand", name, size, "--apply", timeout=300)
+        if r.returncode != 0:
+            return f"<pre>{r.stderr or r.stdout}</pre>", 500
+        return redirect(url_for("instance_detail", name=name))
+
     # start runs the VM in the foreground; for the GUI we want it backgrounded
     args = ["instance", action, name]
     if action == "start":

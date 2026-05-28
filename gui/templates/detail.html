@@ -38,6 +38,16 @@
     {% endif %}
   </div>
 
+  {% if inst.state != "running" %}
+  <h3>Expand userdata</h3>
+  <form method="post" action="{{ url_for('instance_action', name=inst.name, action='expand') }}" class="inline-row"
+        onsubmit="return confirm('Grow this instance\'s userdata to ' + this.size.value + '? VM must remain stopped during this operation.');">
+    <input name="size" placeholder="+4G or 16G" required pattern="\+?[0-9]+[MmGg]">
+    <button type="submit">Expand</button>
+    <small>Delta (<code>+4G</code>) or absolute (<code>16G</code>). VM must be stopped.</small>
+  </form>
+  {% endif %}
+
   <h3>Serial log (last 8 KB)</h3>
   <pre class="log">{{ log_tail or "(no log yet)" }}</pre>
 

@@ -142,3 +142,16 @@ dl.meta dd { margin: 0; }
 }
 .empty { text-align: center; padding: 3rem 1rem; color: var(--muted); }
 .hint { color: var(--muted); margin-top: 1.5rem; font-size: 0.9rem; }
+
+form.inline-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+form.inline-row input {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 0.4rem 0.7rem;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  width: 12ch;
+}
+form.inline-row input:focus { outline: none; border-color: var(--accent); }
+form.inline-row small { color: var(--muted); font-size: 0.8rem; }
