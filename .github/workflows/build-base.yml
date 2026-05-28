@@ -210,6 +210,7 @@ jobs:
             android-tools-adb simg2img \
             e2fsprogs python3 python3-pip jq curl rsync \
             p7zip-full lzip unzip squashfs-tools dosfstools \
+            grub-efi-amd64-bin grub-common \
             parted
           pip3 install jsonschema --quiet
 
@@ -358,87 +359,11 @@ jobs:
           sudo umount work/mnt/vendor
           sudo rmdir work/mnt/vendor
 
-      # ── Assemble bootable disk image ─────────────────────────────────────────
-      # GPT: p1=ext4 BlissOS (android/ subdir with system.sfs intact),
-      #      p2=ext4 Userdata (8 GiB).
-      # Mirrors the do_install layout: init loop-mounts android/system.sfs at boot.
-      - name: Assemble bootable disk image
+      - name: Generate grub.cfg
         if: steps.plan.outputs.build == 'true'
         run: |
           EXTRACT="work/iso-extract"
-          # Stage into android/ subdir (mirrors do_install)
-          mkdir -p work/stage/android
-          cp "$EXTRACT/kernel" work/stage/android/kernel
-          if [ -f "$EXTRACT/initrd.img" ]; then
-            cp "$EXTRACT/initrd.img" work/stage/android/initrd.img
-          else
-            cp "$EXTRACT/ramdisk.img" work/stage/android/initrd.img
-          fi
-          # system.sfs kept intact (init loop-mounts it); system.img as fallback
-          if   [ -f "$EXTRACT/system.sfs" ]; then cp "$EXTRACT/system.sfs" work/stage/android/system.sfs
-          elif [ -f "$EXTRACT/system.img" ]; then cp "$EXTRACT/system.img" work/stage/android/system.img
-          fi
-          # vendor: ARM-injected raw img > sfs > img from ISO
-          if   [ -f work/vendor.img           ]; then cp work/vendor.img           work/stage/android/vendor.img
-          elif [ -f "$EXTRACT/vendor.sfs"     ]; then cp "$EXTRACT/vendor.sfs"     work/stage/android/vendor.sfs
-          elif [ -f "$EXTRACT/vendor.img"     ]; then cp "$EXTRACT/vendor.img"     work/stage/android/vendor.img
-          fi
-          # product
-          if   [ -f "$EXTRACT/product.sfs" ]; then cp "$EXTRACT/product.sfs" work/stage/android/product.sfs
-          elif [ -f "$EXTRACT/product.img" ]; then cp "$EXTRACT/product.img" work/stage/android/product.img
-          fi
-          echo "=== Stage contents ==="
-          ls -lh work/stage/android/
-
-          # Size: stage content × 1.2 + 256 MiB pad + 8 GiB userdata
-          STAGE_BYTES=$(du -sb work/stage/android | awk '{print $1}')
-          DATA_MIB=$(( (STAGE_BYTES / 1024 / 1024) * 12 / 10 + 256 ))
-          USERDATA_MIB=8192
-          DATA_END_MIB=$(( 1 + DATA_MIB ))
-          DISK_MIB=$(( DATA_END_MIB + USERDATA_MIB + 4 ))
-          echo "Disk: ${DISK_MIB} MiB  (data ${DATA_MIB} MiB + ${USERDATA_MIB} MiB userdata)"
-
-          truncate -s "${DISK_MIB}M" work/disk.raw
-          sudo parted -s work/disk.raw mklabel gpt \
-            mkpart Data     ext4 1MiB           "${DATA_END_MIB}MiB" \
-            mkpart Userdata ext4 "${DATA_END_MIB}MiB" 100%
-
-          LOOP=$(sudo losetup --find --show --partscan work/disk.raw)
-          echo "Loop device: $LOOP"
-          sleep 1
-          sudo mkfs.ext4 -L BlissOS  "${LOOP}p1"
-          sudo mkfs.ext4 -L Userdata "${LOOP}p2"
-          sudo mkdir -p work/mnt/android
-          sudo mount "${LOOP}p1" work/mnt/android
-          sudo cp -a work/stage/android work/mnt/android/
-          sudo umount work/mnt/android
-          sudo rmdir  work/mnt/android
-          sudo losetup -d "$LOOP"
-
-      - name: Convert disk image to qcow2
-        if: steps.plan.outputs.build == 'true'
-        run: |
-          mkdir -p image-cache
-          qemu-img convert -O qcow2 -c \
-            work/disk.raw \
-            "image-cache/${{ matrix.base_image }}"
-          qemu-img info "image-cache/${{ matrix.base_image }}"
-
-      - name: Extract boot sidecars
-        if: steps.plan.outputs.build == 'true'
-        run: |
-          BASE_NAME="${{ matrix.base_image }}"
-          BASE_NAME="${BASE_NAME%.qcow2}"
-          EXTRACT="work/iso-extract"
-
-          cp "$EXTRACT/kernel" "image-cache/${BASE_NAME}-kernel"
-          if [ -f "$EXTRACT/initrd.img" ]; then
-            cp "$EXTRACT/initrd.img" "image-cache/${BASE_NAME}-initrd.img"
-          else
-            cp "$EXTRACT/ramdisk.img" "image-cache/${BASE_NAME}-initrd.img"
-          fi
-
-          # Awk-based GRUB menuentry parser (handles EFI grub.cfg / android.cfg)
+          # Awk-based GRUB menuentry parser + ISOLINUX fallback (same as extract sidecars)
           _linux_line=""
           for _cfg in "$EXTRACT/_cfg/android.cfg" "$EXTRACT/_cfg/grub.cfg" \
                       "$EXTRACT/_cfg"/*.cfg; do
@@ -450,7 +375,6 @@ jobs:
               }' "$_cfg" 2>/dev/null || true)
             [ -n "$_line" ] && { _linux_line="$_line"; break; }
           done
-          # ISOLINUX fallback (BlissOS 14 / Android-x86 ISOs)
           if [ -z "$_linux_line" ]; then
             for _icfg in "$EXTRACT/_cfg/isolinux.cfg" "$EXTRACT/_cfg/android.cfg" \
                          "$EXTRACT/_cfg/default.cfg" "$EXTRACT/_cfg"/*.cfg; do
@@ -462,30 +386,125 @@ jobs:
               }
             done
           fi
-
           if [ -n "$_linux_line" ]; then
-            _base=$(echo "$_linux_line" \
+            _iso_base=$(echo "$_linux_line" \
               | sed -E 's/^\s*linux\s+\S+\s*//' \
               | tr ' ' '\n' \
               | grep -vE '^(root=|SRC=|DATA=|BOOT_IMAGE=|iso-scan|console=|quiet$|nomodeset$|androidboot\.enable_console=|HWC=|GRALLOC=)' \
               | grep -v '^$' | tr '\n' ' ' | sed 's/[[:space:]]*$//')
           else
-            echo "::warning::No linux/APPEND line found in ISO config — using fallback cmdline"
-            _base="androidboot.hardware=android_x86_64 androidboot.selinux=permissive"
+            echo "::warning::No linux/APPEND line found — using fallback cmdline"
+            _iso_base="androidboot.hardware=android_x86_64 androidboot.selinux=permissive"
           fi
+          _cmdline="${_iso_base} SRC=android DATA=Userdata HWC=swiftshader"
+          echo "Cmdline: ${_cmdline}"
+          cat > work/grub.cfg <<GRUBEOF
+          set timeout=5
+          set default=0
 
-          printf '%s SRC=android HWC=swiftshader\n' "$_base" \
-            | sed 's/[[:space:]]\+/ /g; s/ *$//' \
-            > "image-cache/${BASE_NAME}-cmdline"
-          echo "Cmdline: $(cat "image-cache/${BASE_NAME}-cmdline")"
-          echo "=== Boot sidecars ==="
-          ls -lh "image-cache/${BASE_NAME}-"*
+          serial --speed=115200 --unit=0 --word=8 --parity=no --stop=1
+          terminal_input  serial console
+          terminal_output serial console
 
-      - name: Derive base name
-        id: base
+          menuentry "BlissOS / Sakura" --class android {
+              search --set=root --file /android/kernel
+              linux /android/kernel ${_cmdline}
+              initrd /android/initrd.img
+          }
+
+          menuentry "BlissOS / Sakura (debug)" --class android {
+              search --set=root --file /android/kernel
+              linux /android/kernel ${_cmdline} DEBUG=2 console=ttyS0,115200n8 androidboot.enable_console=1
+              initrd /android/initrd.img
+          }
+          GRUBEOF
+
+      - name: Build GRUB EFI binary
+        if: steps.plan.outputs.build == 'true'
         run: |
-          img="${{ matrix.base_image }}"
-          echo "name=${img%.qcow2}" >> "$GITHUB_OUTPUT"
+          cat > work/grub-stub.cfg <<'STUBEOF'
+          search --set=root --label BlissOS
+          set prefix=($root)/grub
+          configfile /grub/grub.cfg
+          STUBEOF
+          grub-mkstandalone \
+              --format=x86_64-efi \
+              --output=work/BOOTX64.EFI \
+              --locales="" --fonts="" \
+              --modules="part_gpt fat ext2 search search_label configfile linux normal echo serial terminal" \
+              "boot/grub/grub.cfg=work/grub-stub.cfg"
+          echo "GRUB EFI: $(du -sh work/BOOTX64.EFI | cut -f1)"
+
+      - name: Assemble bootable disk image
+        if: steps.plan.outputs.build == 'true'
+        run: |
+          EXTRACT="work/iso-extract"
+          mkdir -p work/stage/android
+          cp "$EXTRACT/kernel" work/stage/android/kernel
+          if [ -f "$EXTRACT/initrd.img" ]; then
+            cp "$EXTRACT/initrd.img" work/stage/android/initrd.img
+          else
+            cp "$EXTRACT/ramdisk.img" work/stage/android/initrd.img
+          fi
+          if   [ -f "$EXTRACT/system.sfs" ]; then cp "$EXTRACT/system.sfs" work/stage/android/system.sfs
+          elif [ -f "$EXTRACT/system.img" ]; then cp "$EXTRACT/system.img" work/stage/android/system.img
+          fi
+          if   [ -f work/vendor.img           ]; then cp work/vendor.img           work/stage/android/vendor.img
+          elif [ -f "$EXTRACT/vendor.sfs"     ]; then cp "$EXTRACT/vendor.sfs"     work/stage/android/vendor.sfs
+          elif [ -f "$EXTRACT/vendor.img"     ]; then cp "$EXTRACT/vendor.img"     work/stage/android/vendor.img
+          fi
+          if   [ -f "$EXTRACT/product.sfs" ]; then cp "$EXTRACT/product.sfs" work/stage/android/product.sfs
+          elif [ -f "$EXTRACT/product.img" ]; then cp "$EXTRACT/product.img" work/stage/android/product.img
+          fi
+          echo "=== Stage contents ==="
+          ls -lh work/stage/android/
+
+          ESP_MIB=256
+          STAGE_BYTES=$(du -sb work/stage/android | awk '{print $1}')
+          BLISS_MIB=$(( (STAGE_BYTES / 1024 / 1024) * 12 / 10 + 256 ))
+          USERDATA_MIB=8192
+          ESP_END_MIB=$(( 1 + ESP_MIB ))
+          BLISS_END_MIB=$(( ESP_END_MIB + BLISS_MIB ))
+          DISK_MIB=$(( BLISS_END_MIB + USERDATA_MIB + 4 ))
+          echo "Disk: ${DISK_MIB} MiB (ESP=${ESP_MIB}M + BlissOS=${BLISS_MIB}M + Userdata=${USERDATA_MIB}M)"
+
+          truncate -s "${DISK_MIB}M" work/disk.raw
+          sudo parted -s work/disk.raw mklabel gpt \
+            mkpart ESP      fat32 1MiB                "${ESP_END_MIB}MiB" \
+            set 1 esp on \
+            mkpart BlissOS  ext4  "${ESP_END_MIB}MiB" "${BLISS_END_MIB}MiB" \
+            mkpart Userdata ext4  "${BLISS_END_MIB}MiB" 100%
+
+          LOOP=$(sudo losetup --find --show --partscan work/disk.raw)
+          echo "Loop: $LOOP"
+          sleep 1
+          sudo mkfs.vfat -F32 -n EFI "${LOOP}p1"
+          sudo mkfs.ext4 -L BlissOS  "${LOOP}p2"
+          sudo mkfs.ext4 -L Userdata "${LOOP}p3"
+
+          sudo mkdir -p work/mnt/esp work/mnt/bliss
+          sudo mount "${LOOP}p1" work/mnt/esp
+          sudo mkdir -p work/mnt/esp/EFI/BOOT
+          sudo cp work/BOOTX64.EFI work/mnt/esp/EFI/BOOT/
+          sudo umount work/mnt/esp
+
+          sudo mount "${LOOP}p2" work/mnt/bliss
+          sudo cp -a work/stage/android work/mnt/bliss/
+          sudo mkdir -p work/mnt/bliss/grub
+          sudo cp work/grub.cfg work/mnt/bliss/grub/
+          sudo umount work/mnt/bliss
+
+          sudo rmdir work/mnt/esp work/mnt/bliss
+          sudo losetup -d "$LOOP"
+
+      - name: Convert disk image to qcow2
+        if: steps.plan.outputs.build == 'true'
+        run: |
+          mkdir -p image-cache
+          qemu-img convert -O qcow2 -c \
+            work/disk.raw \
+            "image-cache/${{ matrix.base_image }}"
+          qemu-img info "image-cache/${{ matrix.base_image }}"
 
       - name: Record checksum
         if: steps.plan.outputs.build == 'true'
@@ -563,9 +582,6 @@ jobs:
             ```
           files: |
             image-cache/${{ matrix.base_image }}*
-            image-cache/${{ steps.base.outputs.name }}-kernel
-            image-cache/${{ steps.base.outputs.name }}-initrd.img
-            image-cache/${{ steps.base.outputs.name }}-cmdline
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -617,15 +633,32 @@ jobs:
           echo "=== Partition layout ==="
           lsblk /dev/nbd0
 
-          sudo mkdir -p mnt/android mnt/system
-          sudo mount /dev/nbd0p1 mnt/android
+          sudo mkdir -p mnt/esp mnt/android mnt/system
+          sudo mount /dev/nbd0p1 mnt/esp
 
-          # Files are staged in android/ subdir on p1 (mirrors do_install layout)
+          echo "=== GRUB EFI check (p1 ESP) ==="
+          if sudo test -f "mnt/esp/EFI/BOOT/BOOTX64.EFI"; then
+            echo "  ✓ EFI/BOOT/BOOTX64.EFI present"
+          else
+            echo "  ✗ MISSING: EFI/BOOT/BOOTX64.EFI"
+          fi
+          sudo umount mnt/esp
+
+          sudo mount /dev/nbd0p2 mnt/android
+
+          # Files are staged in android/ subdir on p2 (BlissOS partition)
           ANDROID_DIR="mnt/android/android"
           sudo test -d "$ANDROID_DIR" \
-            || { echo "::error::android/ subdir not found on data partition (p1)"; exit 1; }
+            || { echo "::error::android/ subdir not found on data partition (p2)"; exit 1; }
           echo "=== android/ subdir contents ==="
           sudo ls -lh "$ANDROID_DIR/"
+
+          echo "=== grub/grub.cfg check (p2) ==="
+          if sudo test -f "mnt/android/grub/grub.cfg"; then
+            echo "  ✓ grub/grub.cfg present"
+          else
+            echo "  ✗ MISSING: grub/grub.cfg"
+          fi
 
           # system.sfs is kept intact (squashfs, read-only); system.img as fallback
           SYS=""
@@ -641,7 +674,7 @@ jobs:
               SYS="mnt/system"
             fi
           else
-            echo "::error::No system.sfs or system.img found in android/ on p1"; exit 1
+            echo "::error::No system.sfs or system.img found in android/ on p2"; exit 1
           fi
 
           HAS_VENDOR_IMG=false
@@ -709,25 +742,10 @@ jobs:
             echo "=== ARM translation: disabled for ${{ matrix.distro }} — skipping checks ==="
           fi
 
-          echo "=== Boot sidecars ==="
-          BASE_IMAGE="${{ matrix.base_image }}"
-          BASE_NAME="${BASE_IMAGE%.qcow2}"
-          for sidecar in "image-cache/${BASE_NAME}-kernel" \
-                         "image-cache/${BASE_NAME}-initrd.img" \
-                         "image-cache/${BASE_NAME}-cmdline"; do
-            if [ -f "$sidecar" ]; then
-              echo "  ✓ $(basename "$sidecar")"
-            else
-              echo "  ✗ MISSING: $(basename "$sidecar")"
-              FAIL=$((FAIL+1))
-            fi
-          done
-          echo "  cmdline: $(cat "image-cache/${BASE_NAME}-cmdline" 2>/dev/null || echo '(missing)')"
-
           $HAS_VENDOR_IMG && sudo umount mnt/vendor 2>/dev/null || true
           sudo umount mnt/system mnt/android 2>/dev/null || true
           sudo qemu-nbd --disconnect /dev/nbd0 2>/dev/null || true
-          sudo rmdir mnt/vendor mnt/system mnt/android 2>/dev/null || true
+          sudo rmdir mnt/vendor mnt/system mnt/android mnt/esp 2>/dev/null || true
 
           if [ "$FAIL" -gt 0 ]; then
             echo "::error::${FAIL} static check(s) failed for ${{ matrix.distro }}"
@@ -757,7 +775,7 @@ jobs:
       - name: Install ADB
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends android-tools-adb qemu-utils
+          sudo apt-get install -y --no-install-recommends android-tools-adb qemu-utils ovmf
 
       - name: Get bliss14 cache key from matrix
         id: bliss14
@@ -779,23 +797,19 @@ jobs:
       - name: Boot VM headlessly
         run: |
           BASE_IMAGE="${{ steps.bliss14.outputs.base_image }}"
-          BASE_NAME="${BASE_IMAGE%.qcow2}"
-          KERNEL="image-cache/${BASE_NAME}-kernel"
-          INITRD="image-cache/${BASE_NAME}-initrd.img"
-          CMDLINE_FILE="image-cache/${BASE_NAME}-cmdline"
-          [ -f "$KERNEL" ]       || { echo "::error::Kernel sidecar not found: $KERNEL"; exit 1; }
-          [ -f "$INITRD" ]       || { echo "::error::Initrd sidecar not found: $INITRD"; exit 1; }
-          [ -f "$CMDLINE_FILE" ] || { echo "::error::Cmdline sidecar not found: $CMDLINE_FILE"; exit 1; }
-          ISO_PARAMS=$(cat "$CMDLINE_FILE")
-          APPEND="root=/dev/ram0 ${ISO_PARAMS} DATA=/dev/sda2 console=ttyS0,115200n8 androidboot.enable_console=1 quiet"
+          # Find OVMF
+          OVMF=""
+          for p in /usr/share/OVMF/OVMF.fd /usr/share/ovmf/OVMF.fd \
+                   /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd; do
+            [ -f "$p" ] && { OVMF="$p"; break; }
+          done
+          [ -n "$OVMF" ] || { echo "::error::OVMF not found"; exit 1; }
           qemu-system-x86_64 \
             -enable-kvm \
             -smp 2 -m 2048 \
             -cpu host \
-            -machine pc-q35-10.0,vmport=off \
-            -kernel "$KERNEL" \
-            -initrd "$INITRD" \
-            -append "$APPEND" \
+            -machine q35,vmport=off \
+            -drive "if=pflash,format=raw,readonly=on,file=${OVMF}" \
             -device virtio-scsi-pci,id=scsi0 \
             -drive "file=image-cache/${{ steps.bliss14.outputs.base_image }},if=none,id=hd0" \
             -device "scsi-hd,drive=hd0,bus=scsi0.0" \

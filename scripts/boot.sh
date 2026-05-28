@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boot a profile image in QEMU/KVM.
+# Boot a profile image in QEMU/KVM with GRUB EFI firmware.
 #
 # Usage: boot.sh <profile-name> [OPTIONS]
 #
@@ -9,11 +9,6 @@
 #   --spice               Headless + SPICE remote display on port 5900
 #   --vnc [display]       Headless + VNC on given display number (default: 0 → port 5900)
 #   --snapshot            Ephemeral mode — changes to main image not persisted
-#   --debug [1|2]         Debug boot: add DEBUG=<level>, remove 'quiet'.
-#                           Level 1 (default): busybox shell before Android init — type 'exit' to continue
-#                           Level 2: additional shell breakpoints at each init stage
-#   --nomodeset           Graphics debug: disable DRM/KMS, force software framebuffer
-#   --boot-param <param>  Append an extra kernel parameter (repeatable)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,7 +16,7 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 die() { echo "[boot] ERROR: $*" >&2; exit 1; }
 
-PROFILE_NAME="${1:?Usage: boot.sh <profile-name> [--vm-profile <name>] [--no-kvm] [--headless] [--spice] [--vnc [display]] [--snapshot] [--debug [1|2]] [--nomodeset] [--boot-param <p>]}"
+PROFILE_NAME="${1:?Usage: boot.sh <profile-name> [--vm-profile <name>] [--no-kvm] [--headless] [--spice] [--vnc [display]] [--snapshot]}"
 shift || true
 
 VM_PROFILE_NAME=""
@@ -31,9 +26,6 @@ SPICE_MODE=false
 VNC_MODE=false
 VNC_DISPLAY="0"
 SNAPSHOT=false
-DEBUG_LEVEL=""
-NOMODESET=false
-EXTRA_BOOT_PARAMS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,7 +35,6 @@ while [[ $# -gt 0 ]]; do
     --spice)      SPICE_MODE=true;      shift   ;;
     --vnc)
       VNC_MODE=true
-      # Accept optional display number (e.g. --vnc 1); skip if next arg is a flag or absent
       if [[ $# -gt 1 && "$2" =~ ^[0-9]+$ ]]; then
         VNC_DISPLAY="$2"; shift 2
       else
@@ -51,13 +42,6 @@ while [[ $# -gt 0 ]]; do
       fi
       ;;
     --snapshot)   SNAPSHOT=true;        shift   ;;
-    --debug)
-      DEBUG_LEVEL="1"
-      shift
-      if [[ $# -gt 0 && "${1:-}" =~ ^[12]$ ]]; then DEBUG_LEVEL="$1"; shift; fi
-      ;;
-    --nomodeset)  NOMODESET=true;       shift   ;;
-    --boot-param) EXTRA_BOOT_PARAMS+=("${2:?--boot-param requires a value}"); shift 2 ;;
     *) echo "[boot] Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -106,28 +90,21 @@ if [ "$CPU_CORES" -gt "$MAX_VM_CORES" ]; then
   CPU_CORES="$MAX_VM_CORES"
 fi
 
-# ── Image paths ────────────────────────────────────────────────────────────────
+# ── Image path ─────────────────────────────────────────────────────────────────
 IMG="${ROOT}/builds/android11-${PROFILE_NAME}-latest.qcow2"
 [ -f "$IMG" ] || { echo "[boot] ERROR: Image not found: $IMG" >&2; exit 1; }
 
-# ── Boot sidecars ──────────────────────────────────────────────────────────────
-KERNEL="${ROOT}/builds/android11-${PROFILE_NAME}-kernel"
-INITRD="${ROOT}/builds/android11-${PROFILE_NAME}-initrd.img"
-CMDLINE_FILE="${ROOT}/builds/android11-${PROFILE_NAME}-cmdline"
-[ -f "$KERNEL" ]       || die "Kernel sidecar not found: $KERNEL — run: bash scripts/set-profile.sh ${PROFILE_NAME} --rebuild"
-[ -f "$INITRD" ]       || die "Initrd sidecar not found: $INITRD — run: bash scripts/set-profile.sh ${PROFILE_NAME} --rebuild"
-[ -f "$CMDLINE_FILE" ] || die "Cmdline sidecar not found: $CMDLINE_FILE — run: bash scripts/set-profile.sh ${PROFILE_NAME} --rebuild"
-
-ISO_PARAMS=$(cat "$CMDLINE_FILE")
-APPEND="root=/dev/ram0 ${ISO_PARAMS} DATA=/dev/sda2 console=ttyS0,115200n8"
-if [ -n "$DEBUG_LEVEL" ]; then
-  APPEND="${APPEND} androidboot.enable_console=1 DEBUG=${DEBUG_LEVEL}"
-  echo "[boot] Debug boot: DEBUG=${DEBUG_LEVEL} (type 'exit' at busybox prompt to continue)"
-else
-  APPEND="${APPEND} quiet"
-fi
-$NOMODESET && APPEND="${APPEND} nomodeset"
-for _p in "${EXTRA_BOOT_PARAMS[@]}"; do APPEND="${APPEND} ${_p}"; done
+# ── OVMF/UEFI firmware ────────────────────────────────────────────────────────
+OVMF_PATH=""
+for _ovmf in /usr/share/OVMF/OVMF.fd \
+             /usr/share/ovmf/OVMF.fd \
+             /usr/share/OVMF/OVMF_CODE_4M.fd \
+             /usr/share/OVMF/OVMF_CODE.fd \
+             /usr/share/edk2/x64/OVMF_CODE.fd \
+             /usr/share/edk2-ovmf/OVMF_CODE.fd; do
+  [ -f "$_ovmf" ] && { OVMF_PATH="$_ovmf"; break; }
+done
+[ -n "$OVMF_PATH" ] || die "OVMF not found — install: sudo apt install ovmf"
 
 # ── KVM flags ─────────────────────────────────────────────────────────────────
 KVM_FLAGS=()
@@ -135,8 +112,6 @@ CPU_VENDOR=$(detect_cpu_vendor)
 if $NO_KVM; then
   echo "[boot] KVM disabled — using TCG (slow)"
 elif [ -e /dev/kvm ]; then
-  # -enable-kvm activates the KVM hypervisor for near-native CPU performance.
-  # -cpu host exposes the host CPU features directly to the guest.
   KVM_FLAGS=(-enable-kvm -cpu host,+hypervisor)
   echo "[boot] KVM enabled (${CPU_VENDOR})"
 else
@@ -172,7 +147,7 @@ if $SPICE_MODE; then
     -chardev "spicevmc,id=vdagent,name=vdagent"
     -device "virtserialport,chardev=vdagent,name=com.redhat.spice.0"
   )
-  GPU_FLAGS=()   # SPICE manages its own rendering
+  GPU_FLAGS=()
 elif $VNC_MODE; then
   VNC_PORT=$(( 5900 + VNC_DISPLAY ))
   GPU_FLAGS=(-device "virtio-vga,xres=1920,yres=1080")
@@ -238,8 +213,7 @@ ADB_PORT=$(jq -r '.adb_port // 5555' "$DEFAULTS_JSON" 2>/dev/null || echo "5555"
 echo "[boot] Starting VM: profile=${PROFILE_NAME}  vm-profile=${VM_PROFILE_NAME}"
 echo "[boot] Resources:   ${CPU_CORES}c/${CPU_THREADS}t  ${RAM_MB}MB RAM"
 echo "[boot] Image:       ${IMG}"
-echo "[boot] Kernel:      ${KERNEL}"
-echo "[boot] Append:      ${APPEND}"
+echo "[boot] OVMF:        ${OVMF_PATH}"
 echo "[boot] ADB:         adb connect localhost:${ADB_PORT}"
 $SPICE_MODE && echo "[boot] SPICE:        spice://localhost:5900"
 
@@ -248,10 +222,8 @@ qemu-system-x86_64 \
   -smp "cores=${CPU_CORES},threads=${CPU_THREADS}" \
   -m "${RAM_MB}" \
   "${HUGEPAGES_FLAGS[@]}" \
-  -machine pc-q35-10.0,vmport=off \
-  -kernel "$KERNEL" \
-  -initrd "$INITRD" \
-  -append "$APPEND" \
+  -machine q35,vmport=off \
+  -drive "if=pflash,format=raw,readonly=on,file=${OVMF_PATH}" \
   -device virtio-scsi-pci,id=scsi0 \
   -drive "file=${IMG},if=none,id=hd0,${IMG_SNAPSHOT}" \
   -device "scsi-hd,drive=hd0,bus=scsi0.0" \
@@ -272,13 +244,11 @@ QEMU_PID=$!
 echo "$QEMU_PID" > "$PID_FILE"
 
 if $VNC_MODE || $SPICE_MODE || $HEADLESS; then
-  # Return terminal immediately; background subshell cleans up PID file on exit
   ( wait "$QEMU_PID" 2>/dev/null; rm -f "$PID_FILE" ) &
   disown
   echo "[boot] VM running in background (PID ${QEMU_PID})"
   echo "[boot] Stop with: android-vm stop ${PROFILE_NAME}"
 else
-  # Interactive: terminal is attached to QEMU monitor — block until VM exits
   wait "$QEMU_PID" || true
   rm -f "$PID_FILE"
 fi

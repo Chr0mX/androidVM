@@ -253,17 +253,17 @@ cmd_reset() {
   local img="${ROOT}/builds/android11-${device_profile}-latest.qcow2"
   [ -f "$img" ] || die "No built image for '${device_profile}': ${img}"
 
-  log "Reformatting userdata partition (sda2) in $(basename "$img") ..."
+  log "Reformatting userdata partition (sda3) in $(basename "$img") ..."
   sudo modprobe nbd max_part=8
   sudo qemu-nbd --connect=/dev/nbd0 "$img"
   sleep 1
   # Capture the mkfs result so the NBD device is always disconnected, even on
   # failure, before reporting the error.
   local mkfs_rc=0
-  sudo mkfs.ext4 -F -L Userdata /dev/nbd0p2 || mkfs_rc=$?
+  sudo mkfs.ext4 -F -L Userdata /dev/nbd0p3 || mkfs_rc=$?
   sudo qemu-nbd --disconnect /dev/nbd0
   [ "$mkfs_rc" -eq 0 ] || die "mkfs.ext4 failed (exit ${mkfs_rc}) — userdata not reset"
-  ok "Userdata reset for '${device_profile}' (sda2 reformatted as ext4)"
+  ok "Userdata reset for '${device_profile}' (sda3 reformatted as ext4)"
 }
 
 # ── cmd_update ────────────────────────────────────────────────────────────────
@@ -299,9 +299,6 @@ cmd_update() {
         ROOT="${ROOT}" bash "$fetch_script" \
           "$owner_repo" "${base_image}*" "${ROOT}/intermediate/" \
           --tag-prefix "${slug}-base-" \
-          --also "${base_name}-kernel" \
-          --also "${base_name}-initrd.img" \
-          --also "${base_name}-cmdline" \
           && updated=$(( updated + 1 )) \
           || warn "No GitHub Release found for '${slug}' — build locally: bash scripts/lib/fetch-distro.sh ${slug}"
         # Purge profile overlays backed by this intermediate if it was replaced

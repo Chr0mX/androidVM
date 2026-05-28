@@ -35,7 +35,7 @@ DISTRO_FILE="${ROOT}/androiddistro/${DISTRO_NAME}.json"
 OUT_IMG="${ROOT}/builds/android11-${PROFILE_NAME}-$(date +%Y%m%d).qcow2"
 LATEST_LINK="${ROOT}/builds/android11-${PROFILE_NAME}-latest.qcow2"
 
-# p1 = Android data partition (system.img, vendor.img, etc.)
+# p2 = BlissOS data partition (android/ subdir with system.sfs, vendor.img, etc.)
 MNT_ANDROID="${ROOT}/mnt/android"
 # Loop-mounted from system.img on p1
 MNT_SYSTEM="${ROOT}/mnt/system"
@@ -125,8 +125,8 @@ else
   log "Partition layout:"
   lsblk /dev/nbd0
 
-  # p1 = Android data partition (android/ subdir with system.sfs, vendor.img, etc.)
-  sudo mount /dev/nbd0p1 "$MNT_ANDROID"
+  # p2 = BlissOS data partition (android/ subdir with system.sfs, vendor.img, etc.)
+  sudo mount /dev/nbd0p2 "$MNT_ANDROID"
 
   # system is now system.sfs (squashfs — read-only, cannot be patched in place)
   ANDROID_DIR="${MNT_ANDROID}/android"
@@ -239,19 +239,6 @@ else
   echo "$DISTRO_NAME" > "${ROOT}/builds/android11-${PROFILE_NAME}.distro"
   log "Latest → $OUT_IMG"
 fi
-
-# ── Copy boot sidecars ─────────────────────────────────────────────────────
-BASE_NAME="${DISTRO_BASE_IMAGE%.qcow2}"
-INTER_KERNEL="${ROOT}/intermediate/${BASE_NAME}-kernel"
-INTER_INITRD="${ROOT}/intermediate/${BASE_NAME}-initrd.img"
-INTER_CMDLINE="${ROOT}/intermediate/${BASE_NAME}-cmdline"
-for _sidecar in "$INTER_KERNEL" "$INTER_INITRD" "$INTER_CMDLINE"; do
-  [ -f "$_sidecar" ] || die "Boot sidecar not found: $_sidecar — rebuild intermediate: bash scripts/lib/fetch-distro.sh ${DISTRO_NAME} --force"
-done
-cp "$INTER_KERNEL"  "${ROOT}/builds/android11-${PROFILE_NAME}-kernel"
-cp "$INTER_INITRD"  "${ROOT}/builds/android11-${PROFILE_NAME}-initrd.img"
-cp "$INTER_CMDLINE" "${ROOT}/builds/android11-${PROFILE_NAME}-cmdline"
-log "Boot sidecars copied: kernel initrd.img cmdline"
 
 # ── Boot ───────────────────────────────────────────────────────────────────
 if $BOOT; then

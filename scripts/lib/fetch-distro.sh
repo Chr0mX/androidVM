@@ -8,11 +8,7 @@
 #   --gapps <zip>    Path to GApps zip (required only when inject_gapps=true)
 #
 # The script reads all source + build parameters from androiddistro/<slug>.json.
-# Supported source.type values:
-#   direct             — downloads from source.url (used for Project Sakura / any direct link)
-#   sourceforge_latest — resolves the latest ISO via scripts/lib/resolve-blissos-url.py
-#
-# On completion, intermediate/<base_image> exists and is ready for set-profile.sh.
+# Disk layout: GPT p1=ESP(FAT32) GRUB EFI, p2=ext4(BlissOS) android/ + grub/grub.cfg, p3=ext4(Userdata)
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -41,18 +37,16 @@ die()  { echo "[fetch-distro] ERROR: $*" >&2; exit 1; }
 warn() { echo "[fetch-distro] WARNING: $*" >&2; }
 
 # ── Load distro metadata ───────────────────────────────────────────────────────
-DISTRO_NAME=$(    jq -r '.name'               "$DISTRO_FILE")
-BASE_IMAGE=$(     jq -r '.base_image'         "$DISTRO_FILE")
-INJECT_GAPPS=$(   jq -r 'if .inject_gapps     == false then "false" else "true" end' "$DISTRO_FILE")
-INJECT_ARM_TRANS=$(jq -r 'if .inject_arm_trans == false then "false" else "true" end' "$DISTRO_FILE")
-SOURCE_TYPE=$(    jq -r '.source.type'        "$DISTRO_FILE")
+DISTRO_NAME=$(     jq -r '.name'               "$DISTRO_FILE")
+BASE_IMAGE=$(      jq -r '.base_image'         "$DISTRO_FILE")
+INJECT_GAPPS=$(    jq -r 'if .inject_gapps     == true then "true" else "false" end' "$DISTRO_FILE")
+INJECT_ARM_TRANS=$(jq -r 'if .inject_arm_trans == true then "true" else "false" end' "$DISTRO_FILE")
+SOURCE_TYPE=$(     jq -r '.source.type'        "$DISTRO_FILE")
 
 OUT_IMG="${ROOT}/intermediate/${BASE_IMAGE}"
 
 log "Distro: ${DISTRO_NAME}  slug=${SLUG}  inject_gapps=${INJECT_GAPPS}"
 log "Output: ${OUT_IMG}"
-
-SIDECARS_ONLY=false
 
 # ── Resolve ISO URL ────────────────────────────────────────────────────────────
 ISO_URL=""
@@ -82,28 +76,18 @@ esac
 log "ISO URL:  ${ISO_URL}"
 log "Filename: ${ISO_FILENAME}"
 
-# ── Idempotency / sidecar check ───────────────────────────────────────────────
+# ── Idempotency ───────────────────────────────────────────────────────────────
 if [ -f "$OUT_IMG" ] && ! $FORCE; then
-  _base="${BASE_IMAGE%.qcow2}"
-  if [ -f "${ROOT}/intermediate/${_base}-kernel" ] \
-  && [ -f "${ROOT}/intermediate/${_base}-initrd.img" ] \
-  && [ -f "${ROOT}/intermediate/${_base}-cmdline" ]; then
-    log "Intermediate image and boot sidecars already exist: ${OUT_IMG}"
-    log "Use --force to rebuild."
-    exit 0
-  fi
-  log "Intermediate image exists but boot sidecars are missing — extracting from cached ISO..."
-  SIDECARS_ONLY=true
+  log "Intermediate image already exists: ${OUT_IMG}"
+  log "Use --force to rebuild."
+  exit 0
 fi
 
 # ── GApps resolution ──────────────────────────────────────────────────────────
 GAPPS_ZIP=""
-# Per-distro URL from JSON; fall back to OpenGApps pico x86_64 11.0 if unset
 GAPPS_URL_DEFAULT=$(jq -r '.gapps.url // ""' "$DISTRO_FILE")
 [ -z "$GAPPS_URL_DEFAULT" ] && \
   GAPPS_URL_DEFAULT="https://sourceforge.net/projects/opengapps/files/x86_64/20220503/open_gapps-x86_64-11.0-pico-20220503.zip/download"
-
-# Per-slug cache path avoids bliss14 and bliss15 sharing the same gapps.zip
 GAPPS_CACHED="${ROOT}/gapps/${SLUG}-gapps.zip"
 
 if [ "$INJECT_GAPPS" = "true" ]; then
@@ -142,13 +126,17 @@ WORK="${ROOT}/cache/fetch-distro-${SLUG}"
 ISO_DIR="${ROOT}/cache/source-iso"
 mkdir -p "$WORK" "$ISO_DIR" "${ROOT}/intermediate"
 
+LOOP_DEV=""
+
 cleanup_work() {
   log "Cleaning up work directory..."
   sudo umount "${WORK}/mnt/vendor"  2>/dev/null || true
-  sudo umount "${WORK}/mnt/android" 2>/dev/null || true
+  sudo umount "${WORK}/mnt/esp"     2>/dev/null || true
+  sudo umount "${WORK}/mnt/bliss"   2>/dev/null || true
   [ -n "${LOOP_DEV:-}" ] && sudo losetup -d "$LOOP_DEV" 2>/dev/null || true
   sudo rm -rf "${WORK}/vendor-sq" 2>/dev/null || true
-  rm -rf "${WORK}/"*.raw "${WORK}/disk.raw" "${WORK}/iso-extract" 2>/dev/null || true
+  rm -rf "${WORK}/"*.raw "${WORK}/disk.raw" "${WORK}/iso-extract" \
+    "${WORK}/grub.cfg" "${WORK}/grub-stub.cfg" "${WORK}/BOOTX64.EFI" 2>/dev/null || true
 }
 trap cleanup_work EXIT
 
@@ -200,8 +188,6 @@ log "Extracted: $(ls "$EXTRACT" | tr '\n' ' ')"
 [ -f "$EXTRACT/system.sfs" ] || [ -f "$EXTRACT/system.img" ] \
   || die "No system.sfs or system.img found in ISO"
 
-if ! $SIDECARS_ONLY; then
-
 # ── Inject ARM translation into vendor (vendor.sfs → vendor.img → inject) ────
 if [ "$INJECT_ARM_TRANS" = "true" ]; then
   log "Extracting vendor for ARM translation injection..."
@@ -219,7 +205,6 @@ if [ "$INJECT_ARM_TRANS" = "true" ]; then
   else
     die "No vendor.sfs or vendor.img in ISO for ARM injection"
   fi
-  # Handle Android sparse format
   if file "${WORK}/vendor.img" | grep -qi "Android sparse"; then
     simg2img "${WORK}/vendor.img" "${WORK}/vendor.raw" \
       && mv "${WORK}/vendor.raw" "${WORK}/vendor.img"
@@ -256,88 +241,29 @@ fi
 log "Staging files into android/ subdir..."
 mkdir -p "${WORK}/stage/android"
 
-# Kernel and initrd
 cp "$EXTRACT/kernel" "${WORK}/stage/android/kernel"
 if   [ -f "$EXTRACT/initrd.img"  ]; then cp "$EXTRACT/initrd.img"  "${WORK}/stage/android/initrd.img"
 elif [ -f "$EXTRACT/ramdisk.img" ]; then cp "$EXTRACT/ramdisk.img" "${WORK}/stage/android/initrd.img"
 fi
 
-# system.sfs kept intact — init loop-mounts it at boot
 if   [ -f "$EXTRACT/system.sfs" ]; then cp "$EXTRACT/system.sfs" "${WORK}/stage/android/system.sfs"
 elif [ -f "$EXTRACT/system.img" ]; then cp "$EXTRACT/system.img" "${WORK}/stage/android/system.img"
 fi
 
-# vendor: ARM-injected raw img takes priority; else sfs/img as-is
 if   [ -f "${WORK}/vendor.img"     ]; then cp "${WORK}/vendor.img"     "${WORK}/stage/android/vendor.img"
 elif [ -f "$EXTRACT/vendor.sfs"    ]; then cp "$EXTRACT/vendor.sfs"    "${WORK}/stage/android/vendor.sfs"
 elif [ -f "$EXTRACT/vendor.img"    ]; then cp "$EXTRACT/vendor.img"    "${WORK}/stage/android/vendor.img"
 fi
 
-# product
 if   [ -f "$EXTRACT/product.sfs" ]; then cp "$EXTRACT/product.sfs" "${WORK}/stage/android/product.sfs"
 elif [ -f "$EXTRACT/product.img" ]; then cp "$EXTRACT/product.img" "${WORK}/stage/android/product.img"
 fi
 
 log "Staged: $(ls "${WORK}/stage/android" | tr '\n' ' ')"
 
-# ── Assemble bootable disk (GPT: ext4 Data p1 with android/ + ext4 Userdata p2) ──
-log "Assembling bootable disk image..."
-STAGE_BYTES=$(du -sb "${WORK}/stage/android" | awk '{print $1}')
-DATA_MIB=$(( (STAGE_BYTES / 1024 / 1024) * 12 / 10 + 256 ))
-USERDATA_MIB=8192
-DATA_END_MIB=$(( 1 + DATA_MIB ))
-DISK_MIB=$(( DATA_END_MIB + USERDATA_MIB + 4 ))
-
-log "Disk: ${DISK_MIB} MiB  (data ${DATA_MIB} MiB + ${USERDATA_MIB} MiB userdata)"
-truncate -s "${DISK_MIB}M" "${WORK}/disk.raw"
-sudo parted -s "${WORK}/disk.raw" \
-  mklabel gpt \
-  mkpart Data     ext4  1MiB               "${DATA_END_MIB}MiB" \
-  mkpart Userdata ext4  "${DATA_END_MIB}MiB" 100%
-
-LOOP_DEV=$(sudo losetup --find --show --partscan "${WORK}/disk.raw")
-log "Loop device: ${LOOP_DEV}"
-sleep 1
-
-sudo mkfs.ext4 -L BlissOS  "${LOOP_DEV}p1"
-sudo mkfs.ext4 -L Userdata "${LOOP_DEV}p2"
-
-mkdir -p "${WORK}/mnt/android"
-sudo mount "${LOOP_DEV}p1" "${WORK}/mnt/android"
-sudo cp -a "${WORK}/stage/android" "${WORK}/mnt/android/"
-sudo umount "${WORK}/mnt/android"
-sudo rmdir  "${WORK}/mnt/android"
-sudo losetup -d "$LOOP_DEV"
-LOOP_DEV=""
-
-# ── Convert raw disk to qcow2 ─────────────────────────────────────────────────
-log "Converting disk.raw → ${BASE_IMAGE} (qcow2, compressed)..."
-qemu-img convert -O qcow2 -c "${WORK}/disk.raw" "$OUT_IMG"
-qemu-img info "$OUT_IMG"
-log "Recording checksum..."
-sha256sum "$OUT_IMG" >> "${ROOT}/checksums.sha256"
-
-fi  # end if ! $SIDECARS_ONLY
-
-# ── Extract boot sidecars (kernel, initrd, cmdline) ──────────────────────────
-BASE_NAME="${BASE_IMAGE%.qcow2}"
-SIDECAR_KERNEL="${ROOT}/intermediate/${BASE_NAME}-kernel"
-SIDECAR_INITRD="${ROOT}/intermediate/${BASE_NAME}-initrd.img"
-SIDECAR_CMDLINE="${ROOT}/intermediate/${BASE_NAME}-cmdline"
-
-[ -f "$EXTRACT/kernel" ]     || die "kernel not found in extracted ISO"
-cp "$EXTRACT/kernel" "$SIDECAR_KERNEL"
-log "Kernel sidecar: ${SIDECAR_KERNEL} ($(du -sh "$SIDECAR_KERNEL" | cut -f1))"
-
-if   [ -f "$EXTRACT/initrd.img"  ]; then cp "$EXTRACT/initrd.img"  "$SIDECAR_INITRD"
-elif [ -f "$EXTRACT/ramdisk.img" ]; then cp "$EXTRACT/ramdisk.img" "$SIDECAR_INITRD"
-else die "No initrd.img or ramdisk.img found in ISO"
-fi
-log "Initrd sidecar: ${SIDECAR_INITRD} ($(du -sh "$SIDECAR_INITRD" | cut -f1))"
-
-# ── Extract ISO base cmdline (awk GRUB + ISOLINUX fallback) ──────────────────
+# ── Extract ISO cmdline for grub.cfg ──────────────────────────────────────────
+log "Extracting ISO cmdline for grub.cfg..."
 _linux_line=""
-# GRUB menuentry style (BlissOS 15 / android.cfg)
 for _cfg in "$EXTRACT/_cfg/android.cfg" "$EXTRACT/_cfg/grub.cfg" \
             "$EXTRACT/_cfg/"*.cfg; do
   [ -f "$_cfg" ] || continue
@@ -348,7 +274,6 @@ for _cfg in "$EXTRACT/_cfg/android.cfg" "$EXTRACT/_cfg/grub.cfg" \
     }' "$_cfg" 2>/dev/null || true)
   [ -n "$_line" ] && { _linux_line="$_line"; break; }
 done
-# ISOLINUX APPEND fallback (BlissOS 14 / Android-x86)
 if [ -z "$_linux_line" ]; then
   for _icfg in "$EXTRACT/_cfg/isolinux.cfg" "$EXTRACT/_cfg/android.cfg" \
                "$EXTRACT/_cfg/default.cfg"; do
@@ -362,37 +287,122 @@ if [ -z "$_linux_line" ]; then
 fi
 
 if [ -n "$_linux_line" ]; then
-  _base_params=$(echo "$_linux_line" \
+  _iso_base=$(echo "$_linux_line" \
     | sed -E 's/^\s*linux\s+\S+\s*//' \
     | tr ' ' '\n' \
     | grep -vE '^(root=|SRC=|DATA=|BOOT_IMAGE=|iso-scan|console=|quiet$|nomodeset$|androidboot\.enable_console=|HWC=|GRALLOC=)' \
-    | grep -v '^$' \
-    | tr '\n' ' ' \
-    | sed 's/[[:space:]]*$//')
+    | grep -v '^$' | tr '\n' ' ' | sed 's/[[:space:]]*$//')
 else
   warn "No linux/APPEND line found in ISO config — using fallback cmdline"
-  _base_params="androidboot.hardware=android_x86_64 androidboot.selinux=permissive"
+  _iso_base="androidboot.hardware=android_x86_64 androidboot.selinux=permissive"
 fi
 
-# Append our fixed SRC and HWC (safe default for any QEMU version)
-printf '%s SRC=android HWC=swiftshader\n' "$_base_params" \
-  | sed 's/[[:space:]]\+/ /g; s/ *$//' \
-  > "$SIDECAR_CMDLINE"
-log "Cmdline sidecar: $(cat "$SIDECAR_CMDLINE")"
+_cmdline="${_iso_base} SRC=android DATA=Userdata HWC=swiftshader"
+log "Kernel cmdline: ${_cmdline}"
+
+# ── Generate grub.cfg ─────────────────────────────────────────────────────────
+cat > "${WORK}/grub.cfg" <<GRUBEOF
+set timeout=5
+set default=0
+
+serial --speed=115200 --unit=0 --word=8 --parity=no --stop=1
+terminal_input  serial console
+terminal_output serial console
+
+menuentry "BlissOS / Sakura" --class android {
+    search --set=root --file /android/kernel
+    linux /android/kernel ${_cmdline}
+    initrd /android/initrd.img
+}
+
+menuentry "BlissOS / Sakura (debug)" --class android {
+    search --set=root --file /android/kernel
+    linux /android/kernel ${_cmdline} DEBUG=2 console=ttyS0,115200n8 androidboot.enable_console=1
+    initrd /android/initrd.img
+}
+GRUBEOF
+log "grub.cfg written (cmdline: ${_cmdline})"
+
+# ── Build GRUB standalone EFI binary ──────────────────────────────────────────
+log "Building GRUB EFI binary (grub-mkstandalone)..."
+cat > "${WORK}/grub-stub.cfg" <<'STUBEOF'
+search --set=root --label BlissOS
+set prefix=($root)/grub
+configfile /grub/grub.cfg
+STUBEOF
+grub-mkstandalone \
+    --format=x86_64-efi \
+    --output="${WORK}/BOOTX64.EFI" \
+    --locales="" --fonts="" \
+    --modules="part_gpt fat ext2 search search_label configfile linux normal echo serial terminal" \
+    "boot/grub/grub.cfg=${WORK}/grub-stub.cfg"
+log "GRUB EFI binary: ${WORK}/BOOTX64.EFI ($(du -sh "${WORK}/BOOTX64.EFI" | cut -f1))"
+
+# ── Assemble bootable disk (GPT: p1=ESP FAT32, p2=BlissOS ext4, p3=Userdata ext4) ──
+log "Assembling bootable disk image..."
+ESP_MIB=256
+STAGE_BYTES=$(du -sb "${WORK}/stage/android" | awk '{print $1}')
+BLISS_MIB=$(( (STAGE_BYTES / 1024 / 1024) * 12 / 10 + 256 ))
+USERDATA_MIB=8192
+ESP_END_MIB=$(( 1 + ESP_MIB ))
+BLISS_END_MIB=$(( ESP_END_MIB + BLISS_MIB ))
+DISK_MIB=$(( BLISS_END_MIB + USERDATA_MIB + 4 ))
+
+log "Disk: ${DISK_MIB} MiB  (ESP=${ESP_MIB} MiB + BlissOS=${BLISS_MIB} MiB + Userdata=${USERDATA_MIB} MiB)"
+truncate -s "${DISK_MIB}M" "${WORK}/disk.raw"
+sudo parted -s "${WORK}/disk.raw" \
+  mklabel gpt \
+  mkpart ESP      fat32 1MiB                "${ESP_END_MIB}MiB" \
+  set 1 esp on \
+  mkpart BlissOS  ext4  "${ESP_END_MIB}MiB" "${BLISS_END_MIB}MiB" \
+  mkpart Userdata ext4  "${BLISS_END_MIB}MiB" 100%
+
+LOOP_DEV=$(sudo losetup --find --show --partscan "${WORK}/disk.raw")
+log "Loop device: ${LOOP_DEV}"
+sleep 1
+
+sudo mkfs.vfat -F32 -n EFI "${LOOP_DEV}p1"
+sudo mkfs.ext4 -L BlissOS  "${LOOP_DEV}p2"
+sudo mkfs.ext4 -L Userdata "${LOOP_DEV}p3"
+
+# p1: ESP — install GRUB EFI bootloader
+mkdir -p "${WORK}/mnt/esp"
+sudo mount "${LOOP_DEV}p1" "${WORK}/mnt/esp"
+sudo mkdir -p "${WORK}/mnt/esp/EFI/BOOT"
+sudo cp "${WORK}/BOOTX64.EFI" "${WORK}/mnt/esp/EFI/BOOT/"
+sudo umount "${WORK}/mnt/esp"
+sudo rmdir  "${WORK}/mnt/esp"
+
+# p2: BlissOS — Android files in android/ + grub/grub.cfg
+mkdir -p "${WORK}/mnt/bliss"
+sudo mount "${LOOP_DEV}p2" "${WORK}/mnt/bliss"
+sudo cp -a "${WORK}/stage/android" "${WORK}/mnt/bliss/"
+sudo mkdir -p "${WORK}/mnt/bliss/grub"
+sudo cp "${WORK}/grub.cfg" "${WORK}/mnt/bliss/grub/"
+sudo umount "${WORK}/mnt/bliss"
+sudo rmdir  "${WORK}/mnt/bliss"
+
+sudo losetup -d "$LOOP_DEV"
+LOOP_DEV=""
+
+# ── Convert raw disk to qcow2 ─────────────────────────────────────────────────
+log "Converting disk.raw → ${BASE_IMAGE} (qcow2, compressed)..."
+qemu-img convert -O qcow2 -c "${WORK}/disk.raw" "$OUT_IMG"
+qemu-img info "$OUT_IMG"
+log "Recording checksum..."
+sha256sum "$OUT_IMG" >> "${ROOT}/checksums.sha256"
 
 # ── Tidy work directory ───────────────────────────────────────────────────────
 log "Removing work files..."
 rm -rf "${WORK}/disk.raw" "${WORK}/"*.raw "${WORK}/stage" "${WORK}/iso-extract" \
-  "${WORK}/vendor.img" 2>/dev/null || true
+  "${WORK}/vendor.img" "${WORK}/grub.cfg" "${WORK}/grub-stub.cfg" \
+  "${WORK}/BOOTX64.EFI" 2>/dev/null || true
 
 trap - EXIT
 
 log ""
 log "Intermediate image ready: ${OUT_IMG}"
 log "$(qemu-img info "$OUT_IMG" | grep -E 'virtual size|disk size')"
-log "Boot sidecars:"
-log "  ${SIDECAR_KERNEL}"
-log "  ${SIDECAR_INITRD}"
-log "  ${SIDECAR_CMDLINE}"
+log "Disk layout: p1=ESP(GRUB EFI)  p2=BlissOS(android/)  p3=Userdata"
 log ""
 log "Next step:  bash scripts/set-profile.sh <profile> --distro ${SLUG}"
