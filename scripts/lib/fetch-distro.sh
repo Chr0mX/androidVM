@@ -317,7 +317,7 @@ menuentry "BlissOS / Sakura" --class android {
 
 menuentry "BlissOS / Sakura (debug)" --class android {
     search --set=root --file /android/kernel
-    linuxefi /android/kernel ${_cmdline} DEBUG=2 console=ttyS0,115200n8 androidboot.enable_console=1
+    linuxefi /android/kernel ${_cmdline} DEBUG=2 console=tty0 console=ttyS0,115200n8 androidboot.enable_console=1
     initrdefi /android/initrd.img
 }
 GRUBEOF
