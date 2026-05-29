@@ -197,7 +197,7 @@ fi
 
 # ── Serial / monitor flags ────────────────────────────────────────────────────
 mkdir -p "${ROOT}/logs" "${ROOT}/run"
-if $VNC_MODE || $SPICE_MODE; then
+if $VNC_MODE || $SPICE_MODE || $HEADLESS; then
   SERIAL_FLAGS=(-serial "file:${SERIAL_LOG}")
   echo "[boot] Serial log: ${SERIAL_LOG}"
 else
@@ -281,7 +281,13 @@ QEMU_PID=$!
 echo "$QEMU_PID" > "$PID_FILE"
 
 if $VNC_MODE || $SPICE_MODE || $HEADLESS; then
-  ( wait "$QEMU_PID" 2>/dev/null; rm -f "$PID_FILE" "$QMP_SOCK" ) &
+  # Reap the PID file + QMP socket once QEMU actually exits. We poll with
+  # `kill -0` rather than `wait $QEMU_PID`: this disowned subshell is not
+  # QEMU's parent, and `wait` on a non-child returns immediately — which
+  # would delete the PID file the instant the VM launched, breaking all
+  # state tracking (status/stop/GUI) for backgrounded VMs.
+  ( while kill -0 "$QEMU_PID" 2>/dev/null; do sleep 2; done
+    rm -f "$PID_FILE" "$QMP_SOCK" ) &
   disown
   echo "[boot] VM running in background (PID ${QEMU_PID})"
   echo "[boot] Stop with: android-vm stop ${INSTANCE_NAME}"

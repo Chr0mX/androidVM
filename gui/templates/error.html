@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Error — android-vm{% endblock %}
+{% block content %}
+  <h2>{{ heading or "Something went wrong" }}</h2>
+  <div class="error">{{ message }}</div>
+  {% if detail %}<pre class="log">{{ detail }}</pre>{% endif %}
+  <p>
+    {% if back_name %}<a href="{{ url_for('instance_detail', name=back_name) }}" class="button">← Back to {{ back_name }}</a>{% endif %}
+    <a href="{{ url_for('index') }}" class="button">← All instances</a>
+  </p>
+{% endblock %}
