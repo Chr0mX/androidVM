@@ -360,11 +360,19 @@ cmd_expand() {
     die "Instance '${name}' is running — stop it first: android-vm stop ${name}"
   fi
 
-  local img cur_bytes new_bytes
+  local img cur_bytes new_bytes info fmt
   img=$(instance_disk "$name")
   [ -f "$img" ] || die "No disk for '${name}': ${img}"
 
-  cur_bytes=$(qemu-img info --output=json "$img" | jq -r '."virtual-size"')
+  # Single info call gives us both the virtual size and the on-disk format.
+  # Instance disks are qcow2 overlays over the distro intermediate; resizing
+  # the overlay grows only its virtual size and never touches the backing
+  # file. Passing the format explicitly avoids qemu's format-probing path.
+  info=$(qemu-img info --output=json "$img") || die "Cannot read image info: ${img}"
+  cur_bytes=$(jq -r '."virtual-size"' <<<"$info")
+  fmt=$(jq -r '.format // "qcow2"' <<<"$info")
+  [ "$fmt" = "null" ] && fmt="qcow2"
+
   new_bytes=$(resolve_size "$cur_bytes" "$size_arg") || die "Bad size: $size_arg"
 
   if [ "$new_bytes" -le "$cur_bytes" ]; then
@@ -372,38 +380,55 @@ cmd_expand() {
   fi
 
   local delta=$(( new_bytes - cur_bytes ))
-  log "Plan: $(human_size "$cur_bytes") → $(human_size "$new_bytes") (+$(human_size "$delta") added to Userdata)"
+  log "Plan: ${fmt} ${img}"
+  log "      $(human_size "$cur_bytes") → $(human_size "$new_bytes") (+$(human_size "$delta") added to Userdata)"
 
   if ! $apply; then
     log "Dry-run only. Re-run with --apply to perform the expansion."
     return 0
   fi
 
-  log "Resizing qcow2 ..."
-  qemu-img resize "$img" "$new_bytes"
+  log "Resizing ${fmt} image ..."
+  qemu-img resize -f "$fmt" "$img" "$new_bytes" || die "qemu-img resize failed"
 
   local nbd
   nbd=$(alloc_nbd) || die "Could not allocate NBD device"
   log "Using ${nbd}"
-  sudo qemu-nbd --connect="$nbd" "$img"
+  sudo qemu-nbd --connect="$nbd" --format="$fmt" "$img" \
+    || { release_nbd "$nbd"; die "qemu-nbd could not attach ${img}"; }
   sleep 1
 
-  local fail=0
+  local fail=0 part="${nbd}p3"
   log "Fixing GPT and growing p3 (Userdata) to fill new space ..."
   sudo parted -s "$nbd" --fix -- resizepart 3 100% || fail=$?
+
+  # Wait for the kernel to expose the (resized) p3 node before touching its
+  # filesystem — partition rescans aren't always instantaneous, and acting
+  # too early yields a confusing "No such file" from e2fsck.
   if [ "$fail" -eq 0 ]; then
-    sudo partprobe "$nbd" 2>/dev/null || true
-    sleep 1
-    log "fsck p3 ..."
-    sudo e2fsck -fy "${nbd}p3" || fail=$?
+    local tries=0
+    until [ -b "$part" ] || [ "$tries" -ge 20 ]; do
+      sudo partprobe "$nbd" 2>/dev/null || true
+      sleep 0.5; tries=$((tries + 1))
+    done
+    [ -b "$part" ] || { fail=1; warn "Partition node ${part} never appeared"; }
+  fi
+
+  if [ "$fail" -eq 0 ]; then
+    log "fsck p3 (pre) ..."
+    sudo e2fsck -fy "$part" || fail=$?
   fi
   if [ "$fail" -eq 0 ]; then
     log "resize2fs p3 ..."
-    sudo resize2fs "${nbd}p3" || fail=$?
+    sudo resize2fs "$part" || fail=$?
+  fi
+  if [ "$fail" -eq 0 ]; then
+    log "fsck p3 (post) ..."
+    sudo e2fsck -fy "$part" || fail=$?
   fi
   release_nbd "$nbd"
 
-  [ "$fail" -eq 0 ] || die "Expansion failed (exit ${fail}) — qcow2 was resized but partition/fs may need manual repair"
+  [ "$fail" -eq 0 ] || die "Expansion failed (exit ${fail}) — image was resized but partition/fs may need manual repair"
   ok "Expanded '${name}' to $(human_size "$new_bytes") (Userdata grew by $(human_size "$delta"))"
 }
 
